@@ -626,6 +626,18 @@ budget gates, and pause gates remain independently enforced. Comment access is
 structurally downstream of issue read access (`issue:comment` is a subset of
 `issue:read`).
 
+Low-trust agents may create self-assigned tasks and subtasks inside their existing
+project or root-task scope. Both creation endpoints enforce task-assignment
+authorization, including responsible-user and protected-assignment checks, even
+when the new task is unassigned. Created tasks retain the effective containment
+policy and quarantined source attribution. Self-assigned decomposition does not
+count as delegation back to another agent. Persistent instruction changes remain
+restricted except for self-edits requested through authenticated owner chat.
+That exception requires the current accepted identity and a recorded direct
+board-message wake, and rechecks the user's current instruction-editing permission
+when saving. It does not extend to outside work, subtasks, peer instructions, or
+other privileged configuration. Denials name the specific restriction.
+
 Authenticated board direction permits a low-trust agent to execute its own
 human conversation or the exact task explicitly assigned or addressed by a human.
 This server-owned exception is bound to the current assignee and the run's task;
