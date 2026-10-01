@@ -10950,6 +10950,15 @@ export function issueService(db: Db) {
         if ((issueData.assigneeAgentId !== undefined && issueData.assigneeAgentId !== receiptExisting.assigneeAgentId)
           || (issueData.assigneeUserId !== undefined && issueData.assigneeUserId !== receiptExisting.assigneeUserId)) {
           patch.statusVersion = sql`${issues.statusVersion} + 1` as unknown as number;
+          // Invalidate human direction at the common assignment boundary, including
+          // plugin/service writes that do not go through HTTP run cancellation.
+          // Keep the requester attribution for audit; cancellation revokes its use.
+          await tx.update(agentWakeupRequests).set({ status: "cancelled", finishedAt: new Date(), updatedAt: new Date() })
+            .where(and(eq(agentWakeupRequests.companyId, receiptExisting.companyId),
+              eq(agentWakeupRequests.requestedByActorType, "user"),
+              sql`coalesce(${agentWakeupRequests.payload}->>'issueId', ${agentWakeupRequests.payload}->>'taskId',
+                ${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'issueId',
+                ${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'taskId') = ${id}`));
         }
         // Reasserting Blocked or changing its blockers is a fresh decision even
         // when the status string stays the same. Invalidate recovery's prior

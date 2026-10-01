@@ -252,6 +252,7 @@ import {
   normalizeUploadAttachmentContentType,
   SVG_CONTENT_TYPE,
 } from "../attachment-types.js";
+import { retainBacklogHumanAssignment } from "../services/human-directed-work.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
 import { shouldWakeAssigneeForIssueComment } from "../services/issue-comment-wakeup.js";
 import { createSecretProposalsService } from "../services/secret-proposals.js";
@@ -11816,6 +11817,7 @@ export function issueRoutes(
         });
         return;
       }
+      await retainBacklogHumanAssignment(db, issue, actor);
       await issueReferencesSvc.syncIssue(issue.id);
       await externalObjectsSvc.syncIssueSafely(issue.id);
       const referenceSummary =
@@ -12215,6 +12217,7 @@ export function issueRoutes(
         });
       }
 
+      await retainBacklogHumanAssignment(db, issue, actor);
       if (!serializationContext || !currentSerializedChild) {
         void queueIssueAssignmentWakeup({
           heartbeat,
@@ -12474,6 +12477,7 @@ export function issueRoutes(
           });
         }
 
+        await retainBacklogHumanAssignment(db, issue, actor);
         if (!serializedBlockedChildIds.has(issue.id)) {
           void queueIssueAssignmentWakeup({
             heartbeat,
@@ -13816,6 +13820,10 @@ export function issueRoutes(
             details: { source: "issue_status_cancelled", issueId: existing.id },
           });
         }
+      }
+
+      if (req.body.assigneeAgentId !== undefined) {
+        await retainBacklogHumanAssignment(db, issue, actor);
       }
 
       if (titleOrDescriptionChanged) {

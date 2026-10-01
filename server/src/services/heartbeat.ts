@@ -13126,7 +13126,9 @@ export function heartbeatService(
     await db
       .update(agentWakeupRequests)
       .set({ status, ...patch, updatedAt: new Date() })
-      .where(eq(agentWakeupRequests.id, wakeupRequestId));
+      // Reassignment revokes requests transactionally. Late execution settlement
+      // must not turn a revoked request back into authority for a later retry.
+      .where(and(eq(agentWakeupRequests.id, wakeupRequestId), ne(agentWakeupRequests.status, "cancelled")));
   }
 
   async function addContinuationExhaustedCommentOnce(input: {
@@ -17191,6 +17193,7 @@ export function heartbeatService(
                 eq(agentWakeupRequests.companyId, current.companyId),
                 eq(agentWakeupRequests.agentId, current.agentId),
                 eq(agentWakeupRequests.runId, current.id),
+                ne(agentWakeupRequests.status, "cancelled"),
               ),
             );
         await tx
@@ -17929,7 +17932,7 @@ export function heartbeatService(
         await tx
           .update(agentWakeupRequests)
           .set({ status: "queued", claimedAt: null, updatedAt: now })
-          .where(eq(agentWakeupRequests.id, released.wakeupRequestId));
+          .where(and(eq(agentWakeupRequests.id, released.wakeupRequestId), ne(agentWakeupRequests.status, "cancelled")));
       }
 
       const context = parseObject(released.contextSnapshot);
@@ -26700,6 +26703,10 @@ export function heartbeatService(
       triggerDetail,
       payload,
     });
+    // Keep each request's own server-derived origin, including coalesced wakes.
+    // A run's merged context cannot establish which caller authored one receipt.
+    // Overwrite caller-supplied nested context rather than trusting it.
+    payload = { ...payload, [DEFERRED_WAKE_CONTEXT_KEY]: { ...enrichedContextSnapshot } };
     let issueId =
       readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueIdFromPayload;
     if (executionReconciliationWake && !issueId) return null;

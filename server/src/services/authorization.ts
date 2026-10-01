@@ -1,5 +1,6 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { withHumanDirectedWork } from "./human-directed-work.js";
 import {
   agents,
   authUsers,
@@ -873,12 +874,16 @@ export function authorizationService(db: Db | DbTransaction) {
   }): Promise<TrustPresetResolution> {
     const { issue, project } = await loadResourceContext(input.resource);
     const run = await loadRunPolicy(input.actor.runId, input.companyId, input.actorAgent.id);
-    return resolveCoreTrustPreset({
+    const resolution = resolveCoreTrustPreset({
       companyId: input.companyId,
       agent: input.actorAgent,
       project,
       issue,
       run,
+    });
+    if (!input.actor.runId || resolution.kind !== "low_trust_review") return resolution;
+    return withHumanDirectedWork(db, resolution, {
+      companyId: input.companyId, agentId: input.actorAgent.id, runId: input.actor.runId,
     });
   }
 
@@ -1035,6 +1040,10 @@ export function authorizationService(db: Db | DbTransaction) {
     if (input.action === "issue:comment" || input.action === "issue:read" || input.action === "issue:mutate") {
       if (input.resource.type !== "issue") {
         return lowTrustDeny("Low-trust issue access is missing an issue resource.");
+      }
+      if (input.resolution.humanDirectedIssueId && input.resource.companyId === boundary.companyId &&
+          input.resource.issueId === input.resolution.humanDirectedIssueId) {
+        return lowTrustAllow("Allowed on the exact task directed by an authenticated human.");
       }
       if (input.action === "issue:comment" && input.directParentReportTarget) {
         if (

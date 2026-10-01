@@ -41,6 +41,35 @@ Low-trust agents cannot read or mutate agent configuration, instruction bundles,
 or company skill configuration through direct grants. Configuration changes from
 low-trust work must go through higher-trust review and promotion paths instead.
 
+## Human-directed work
+
+An authenticated board user can talk to a low-trust agent in their own Agent
+Chat or assign it a task outside its default intake boundary. Existing conversation
+identity authorizes owner chat. Ordinary tasks use the human requester already
+recorded on the run's wakeup requests, including coalesced requests. Each request
+retains its server-owned origin; plugin-attributed users do not count as board
+instructions. Legacy board assignment requests remain valid through their existing
+assignment source, reason, and human requester, without trusting old plugin human
+attribution. A board backlog assignment is retained as a completed assignment
+request with no run, so it authorizes the later system launch without starting
+work prematurely. No separate permission table or client-supplied human identity is needed. Responsible-user
+attribution, external connector sender attribution, and agent claims do not qualify.
+
+At dispatch and API authorization, Paperclip checks the live run and current
+assignment in one database snapshot. The exception permits reading, commenting
+on, and updating only that run's exact task. It does not extend to another task,
+a child, a whole project, configuration, instructions, secrets, or runtime
+management. Normal responsible-user checks still apply. The exception is never
+stored in the inherited trust boundary.
+
+Automatic retries and continuations follow the existing `retryOfRunId` database
+links, checking the same company, agent, and task at every step. Cancelled runs
+cannot authorize a retry. The common assignment transaction cancels prior human
+requests, including plugin and service reassignments. Assigning the task back
+cannot revive those requests, and late run settlement cannot undo cancellation. Sandbox and
+isolated workspace requirements still apply, as do malformed-policy and
+company-boundary checks.
+
 ## Child→Parent Reporting Under Containment
 
 The direct-parent report comment (`doc/execution-semantics.md` §6, "Child→Parent
@@ -59,7 +88,8 @@ runtime boundary:
 
 - the selected execution environment must use the `sandbox` driver
 - the effective execution workspace mode must be `isolated_workspace`
-- the issue being run must be inside the resolved low-trust boundary
+- the issue being run must be inside the resolved low-trust boundary or be the
+  exact human-directed task described above
 - secret references must use binding ids explicitly allowed by the boundary
 - inline sensitive environment values such as API keys and tokens are rejected
 - workspace runtime-service mutations are denied unless the boundary explicitly
