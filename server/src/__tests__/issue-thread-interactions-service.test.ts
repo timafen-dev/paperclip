@@ -4474,6 +4474,96 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       };
     }
 
+    it.each(["request_confirmation", "request_checkbox_confirmation"] as const)(
+      "projects %s readiness until its source workspace settles",
+      async (kind) => {
+        const { companyId, executionWorkspaceId, issueId, interactionId, sourceRunId, foreignRunId } =
+          await seedAcceptGateFixture({ kind, sourceRunStatus: "running" });
+        // A source run without workspace operations needs no sync barrier.
+        expect((await interactionsSvc.listForIssue(issueId))[0].acceptanceBlocker).toBeUndefined();
+        await db.insert(workspaceOperations).values({
+          companyId, executionWorkspaceId, heartbeatRunId: sourceRunId,
+          phase: "worktree_prepare", status: "succeeded",
+        });
+        const assertPreparing = async () => {
+          const expected = { id: interactionId, status: "pending", acceptanceBlocker: "workspace_sync_pending" };
+          expect((await interactionsSvc.listForIssue(issueId))[0]).toMatchObject(expected);
+          expect(await interactionsSvc.getById(interactionId)).toMatchObject(expected);
+          expect(await interactionsSvc.getForIssue({ id: issueId, companyId }, interactionId)).toMatchObject(expected);
+        };
+        await assertPreparing();
+        const [finalize] = await db.insert(workspaceOperations).values({
+          companyId, executionWorkspaceId, heartbeatRunId: sourceRunId,
+          phase: "workspace_finalize", status: "running",
+        }).returning();
+        await assertPreparing();
+        await db.update(workspaceOperations).set({ status: "succeeded" }).where(eq(workspaceOperations.id, finalize.id));
+        await db.insert(workspaceOperations).values({
+          companyId, executionWorkspaceId, heartbeatRunId: foreignRunId,
+          phase: "worktree_prepare", status: "succeeded",
+        });
+        expect((await interactionsSvc.listForIssue(issueId))[0].acceptanceBlocker).toBeUndefined();
+        expect((await interactionsSvc.getById(interactionId))?.acceptanceBlocker).toBeUndefined();
+        expect((await interactionsSvc.getForIssue({ id: issueId, companyId }, interactionId)).acceptanceBlocker).toBeUndefined();
+      },
+    );
+
+    it.each(["failed", "skipped", "stale"])("does not keep preparing after a %s finalize", async (outcome) => {
+      const { companyId, executionWorkspaceId, issueId, sourceRunId } =
+        await seedAcceptGateFixture({ sourceRunStatus: "failed" });
+      await db.insert(workspaceOperations).values({
+        companyId, executionWorkspaceId, heartbeatRunId: sourceRunId,
+        phase: "workspace_finalize", status: outcome === "stale" ? "running" : outcome,
+      });
+      expect((await interactionsSvc.listForIssue(issueId))[0].acceptanceBlocker).toBeUndefined();
+    });
+
+    it.each(["accepted", "rejected", "cancelled", "expired"])("does not project a blocker on %s history", async (status) => {
+      const { companyId, executionWorkspaceId, issueId, interactionId, sourceRunId } = await seedAcceptGateFixture();
+      await db.insert(workspaceOperations).values({
+        companyId, executionWorkspaceId, heartbeatRunId: sourceRunId,
+        phase: "worktree_prepare", status: "succeeded",
+      });
+      await db.update(issueThreadInteractions).set({ status }).where(eq(issueThreadInteractions.id, interactionId));
+      expect((await interactionsSvc.listForIssue(issueId))[0].acceptanceBlocker).toBeUndefined();
+      expect((await interactionsSvc.getById(interactionId))?.acceptanceBlocker).toBeUndefined();
+    });
+
+    it("does not project a blocker for confirmations expired by task closure", async () => {
+      const { companyId, executionWorkspaceId, issueId, sourceRunId } = await seedAcceptGateFixture();
+      await db.insert(workspaceOperations).values({
+        companyId, executionWorkspaceId, heartbeatRunId: sourceRunId,
+        phase: "worktree_prepare", status: "succeeded",
+      });
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      const [interaction] = await interactionsSvc.listForIssue(issueId);
+      expect(interaction.status).toBe("expired");
+      expect(interaction.acceptanceBlocker).toBeUndefined();
+    });
+
+    it.each(["toolAction", "ask_user_questions"])(
+      "keeps live %s decisions available while the workspace is active",
+      async (kind) => {
+        const { companyId, executionWorkspaceId, issueId, interactionId, sourceRunId } =
+          await seedAcceptGateFixture({ sourceRunStatus: "running" });
+        await db.insert(workspaceOperations).values({
+          companyId, executionWorkspaceId, heartbeatRunId: sourceRunId,
+          phase: "worktree_prepare", status: "succeeded",
+        });
+        const payload = kind === "ask_user_questions"
+          ? { version: 1, questions: [{ id: "question", prompt: "Which option?", selectionMode: "single", options: [{ id: "first", label: "First" }] }] }
+          : { version: 1, prompt: "Allow this action?", [kind]: { version: 1, actionRequestId: randomUUID(), invocationId: randomUUID(), toolName: "example.write",
+                toolDisplayName: "Write", connectionId: randomUUID(), applicationId: randomUUID(),
+                appDisplayName: "Example", risk: "write", previewMarkdown: "Write one row", argumentsSummaryJson: "{}",
+                argumentsHash: "hash", expiresAt: "2099-01-01T00:00:00.000Z" } };
+        await db.update(issueThreadInteractions).set({
+          kind: kind === "ask_user_questions" ? kind : "request_confirmation", payload,
+        }).where(eq(issueThreadInteractions.id, interactionId));
+        expect((await interactionsSvc.listForIssue(issueId))[0].acceptanceBlocker).toBeUndefined();
+        expect((await interactionsSvc.getById(interactionId))?.acceptanceBlocker).toBeUndefined();
+      },
+    );
+
     it("allows request_confirmation accept when the source run finalized but a foreign run is mid-flight", async () => {
       const { companyId, executionWorkspaceId, issueId, goalId, interactionId, sourceRunId, foreignRunId } =
         await seedAcceptGateFixture();
