@@ -778,8 +778,8 @@ export function aiConnectionService(db: Db) {
   /** A late failure must never invalidate credentials that were refreshed or reconnected meanwhile. */
   async function markAuthenticationFailed(input: {
     companyId: string;
-    runId: string;
-    agentId: string;
+    runId?: string;
+    agentId?: string;
     runStartedAt: Date;
     attribution: AiConnectionAttribution & { identity: string };
   }) {
@@ -812,7 +812,7 @@ export function aiConnectionService(db: Db) {
       await tx.update(toolConnections).set({ healthStatus: "error", healthMessage: "Sign in again to restore this AI connection.", updatedAt: new Date() })
         .where(eq(toolConnections.id, connection.id));
       await logActivity(tx as unknown as Db, {
-        companyId: input.companyId, actorType: "system", actorId: "heartbeat",
+        companyId: input.companyId, actorType: "system", actorId: input.runId ? "heartbeat" : "adapter_test",
         agentId: input.agentId, runId: input.runId, action: "ai_connection.authentication_failed",
         entityType: "tool_connection", entityId: connection.id,
         details: { provider: attribution.provider, grantId: grant.id },

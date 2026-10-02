@@ -59,6 +59,16 @@ The additive `ai_provider_defaults` table preserves the legacy per-method prefer
 Revocation retains the unavailable default; connecting another account does not
 silently replace it. Change it explicitly on the account detail page.
 
+Agent settings offer **Reconnect account** when the current personal default
+needs attention. This repairs the same connection and keeps its default and
+agent access. **Connect another account** states that the new account will
+become the user's provider default. It selects the returned grant before
+adopting the binding and retains the actual sign-in method. A failed default
+update stays visible and can be retried without another login. New account
+setup shows an agent-access checkbox, enabled for all company agents by default
+for connection managers. The owner can limit access to the current agent. This access applies only to
+the owner's tasks. Reconnect never expands existing access.
+
 ## Storage and API
 
 AI connections pair `connectionPurpose: ai` with `transport: runtime_auth`.
@@ -77,8 +87,10 @@ and authentication paths are never account labels.
 
 Company-scoped `/api/companies/:companyId/ai-connections` operations provide list,
 API-key creation/reconnect, personal defaults, completed login references, and
-active-run attribution. Existing Connections operations handle naming, access,
-and revocation. Mutation authorization is enforced server-side. OpenAPI documents the new board-only
+active-run attribution. The list includes `canManageConnections`, evaluated by
+the same server permission check as creation, including custom
+`tools:manage_connections` grants. Existing Connections operations handle naming,
+access, and revocation. Mutation authorization is enforced server-side. OpenAPI documents the new board-only
 operations. Agent-originated configuration and environment tests resolve the
 authenticated request’s responsible user; an agent ID is never a personal-account
 owner. A missing responsible identity blocks personal-default resolution.
@@ -137,6 +149,13 @@ run results or logs. A historical generic terminal-limit message alone does not
 establish quota exhaustion.
 
 `prepareManagedAiRuntime` is shared by runs, environment tests, and adoption.
+Test and Save mark the tested account as needing attention when its provider
+hello test rejects authentication or its API-key check returns 401 or 403.
+Network, quota, runtime, and environment failures
+do not change credential health. The same generation check protects a newer
+reconnect from a late test result. Claude ACP's typed `access` failure is its
+provider `auth_required` signal and enters the existing sign-in recovery path,
+including when only the generic terminal-access fallback message is available.
 Claude ACP validates working directories on the selected execution target. A
 sandbox directory does not need to exist on the Paperclip server. When the agent
 has no configured directory, the test uses the remote target's working directory.

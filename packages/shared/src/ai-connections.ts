@@ -173,6 +173,11 @@ export interface AiManagedConnectionSummary {
   status: "connected" | "needs_attention" | "expired" | "revoked";
   unavailableReason?: string;
 }
+export interface AiConnectionList {
+  currentUserId: string;
+  canManageConnections: boolean;
+  connections: AiManagedConnectionSummary[];
+}
 export const createAiConnectionSchema = z
   .object({
     ...requirement,
