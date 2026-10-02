@@ -109,8 +109,10 @@ describe("PaperclipRunnerToolAuthority", () => {
     expect(questions.description).toContain("resolve-from-comment");
     expect(questions.description).toContain("Existing resolver permissions still apply");
     expect(questions.description).toContain("Do not fabricate answer links");
-    expect(JSON.stringify(questions.inputSchema)).toContain("at least two distinct meaningful options");
-    expect(JSON.stringify(questions.inputSchema)).toContain("answerMode:'text'");
+    expect(JSON.stringify(questions.inputSchema)).toContain("at least two meaningful options");
+    expect(questions.inputSchema).toMatchObject({ properties: { payload: { properties: { questionSet: {
+      properties: { questions: { items: { properties: { answerMode: { enum: ["single_select", "multi_select", "text"] } } } } },
+    } } } } });
 
     expect(authority.definitions().map((tool) => tool.name)).toEqual(
       expect.arrayContaining([
@@ -408,7 +410,7 @@ describe("PaperclipRunnerToolAuthority", () => {
         "current Paperclip task bound to this run",
       );
       expect(advertised.description).toContain(
-        "payload.questions for choices",
+        "one complete payload.questionSet",
       );
       expect(advertised.description).toContain(
         "Paperclip renders it and authenticates the response",
@@ -427,7 +429,7 @@ describe("PaperclipRunnerToolAuthority", () => {
     },
   );
 
-  it.each(["choice", "text"] as const)("executes the advertised %s question once on the bound reviewed task", async (answerMode) => {
+  it.each(["choice", "text", "mixed"] as const)("executes the advertised %s question once on the bound reviewed task", async (answerMode) => {
     const binding = {
       companyId: randomUUID(),
       agentId: randomUUID(),
@@ -437,7 +439,7 @@ describe("PaperclipRunnerToolAuthority", () => {
     await db.insert(companies).values({
       id: binding.companyId,
       name: "Question invocation",
-      issuePrefix: answerMode === "choice" ? "RQA" : "RQT",
+      issuePrefix: answerMode === "choice" ? "RQA" : answerMode === "text" ? "RQT" : "RQM",
     });
     await db.insert(agents).values({
       id: binding.agentId,
@@ -474,7 +476,7 @@ describe("PaperclipRunnerToolAuthority", () => {
     const advertised = authority
       .definitions()
       .find((tool) => tool.name === "request_human_input")!;
-    expect(advertised.description).toContain("payload.questions");
+    expect(advertised.description).toContain("payload.questionSet");
     const questions = [
       {
         id: "color",
@@ -490,28 +492,19 @@ describe("PaperclipRunnerToolAuthority", () => {
     const payloadDescription = (advertised.inputSchema as {
       properties: { payload: { description: string } };
     }).properties.payload.description;
-    expect(payloadDescription).toContain("at least two distinct meaningful options");
+    expect(payloadDescription).toContain("at least two meaningful options");
     expect(payloadDescription).toContain("questionSet");
     expect(payloadDescription).not.toContain("use exactly");
     const payload = answerMode === "choice"
       ? { version: 1, questions }
       : {
           version: 1,
-          questions: [{
-            id: "goal",
-            prompt: "What should we accomplish?",
-            selectionMode: "single",
-            required: true,
-            options: [{ id: "describe", label: "Your answer", freeText: true }],
-          }],
           questionSet: {
             schema: "paperclip.question_set.v1",
-            questions: [{
-              id: "goal",
-              prompt: "What should we accomplish?",
-              answerMode: "text",
-              required: true,
-            }],
+            questions: [
+              { id: "goal", prompt: "What should we accomplish?", answerMode: "text", required: true },
+              ...(answerMode === "mixed" ? [{ id: "color", prompt: "Choose one color", answerMode: "single_select", required: true, options: questions[0].options }] : []),
+            ],
           },
         };
     const call = {
@@ -547,6 +540,8 @@ describe("PaperclipRunnerToolAuthority", () => {
       .from(issueThreadInteractions)
       .where(eq(issueThreadInteractions.issueId, binding.issueId));
     expect(rows).toHaveLength(1);
+    expect((rows[0].payload as { questions: { id: string }[] }).questions.map((question) => question.id))
+      .toEqual(answerMode === "choice" ? ["color"] : answerMode === "text" ? ["goal"] : ["goal", "color"]);
     const [task] = await db
       .select()
       .from(issues)

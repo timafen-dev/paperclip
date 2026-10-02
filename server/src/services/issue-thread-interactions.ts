@@ -2,6 +2,7 @@ import {
   currentContinuationOrigins,
   deliveredContinuationCommentIds,
 } from "./execution-continuation.js";
+import { parseQuestionInteractionAnswers } from "./question-interaction-answers.js";
 import { isUniqueViolation } from "../db-errors.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
 import { connectionIntentDeliveries } from "@paperclipai/db";
@@ -47,6 +48,7 @@ import type {
   CancelIssueThreadInteraction,
   ConnectionIntentInteraction,
   CreateIssueThreadInteraction,
+  CreateIssueThreadInteractionInput,
   InteractionResolverGovernance,
   IssueReviewPolicy,
   IssueThreadInteraction,
@@ -3309,7 +3311,7 @@ export function issueThreadInteractionService(
 
     create: async (
       issue: { id: string; companyId: string },
-      input: CreateIssueThreadInteraction,
+      input: CreateIssueThreadInteractionInput,
       actor: InteractionActor,
       options: CreateInteractionOptions = {},
     ) => {
@@ -4894,6 +4896,16 @@ export function issueThreadInteractionService(
         questions: interaction.payload.questions,
         answers: input.answers,
       });
+      if (interaction.payload.questionSet) {
+        try {
+          await parseQuestionInteractionAnswers(interaction.payload.questionSet, normalizedAnswers, interaction.payload.questions);
+        } catch (error) {
+          throw unprocessable(
+            error instanceof Error ? error.message : "Invalid question response",
+            { code: "invalid_question_response" },
+          );
+        }
+      }
 
       const updated = await db.transaction(async (tx) => {
         await assertInteractionRunWriteAllowed(tx as unknown as Db, issue, actor);

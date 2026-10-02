@@ -147,6 +147,18 @@ reject or rewrite execution arguments. Diagnostic detection requires explicit
 credential fields/assignments or recognizable key, Bearer, JWT, or PEM formats,
 not ordinary prose such as "credential handling" or dotted filenames.
 
+Human question tools accept one complete `payload.questionSet` for text and
+choice questions. The control plane generates legacy `questions` entries with
+stable free-text option IDs. Legacy callers remain supported. Calls that supply
+both forms must describe the same complete form; partial forms remain invalid.
+The native recovery bridge uses the same projection for answer delivery.
+
+The server validates canonical answer constraints before persistence. Regex
+matching runs in isolated workers with a one-second deadline and at most four
+active workers. A timeout or capacity error leaves the question pending. The
+ordinary and native answer paths both await this validation before persistence.
+Saved native answer delivery does not repeat regex matching.
+
 Validated ACPX runtime events normalize into the same provider-neutral activity
 families as the direct Codex transport. Reasoning contents stay private. Tool
 targets are resolved within the workspace under the provider host's path

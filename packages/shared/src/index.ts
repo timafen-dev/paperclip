@@ -199,6 +199,7 @@ export type {
   AttentionWorkspaceRef,
 } from "./types/attention.js";
 export { ATTENTION_SOURCE_KINDS } from "./types/attention.js";
+export { questionSetToAskUserQuestionsPayload } from "./question-set.js";
 export type {
   DecisionQueue,
   DecisionQueueItem,
@@ -2080,6 +2081,7 @@ export {
   type CheckoutIssue,
   type AddIssueComment,
   type CreateIssueThreadInteraction,
+  type CreateIssueThreadInteractionInput,
   type AcceptIssueThreadInteraction,
   type RejectIssueThreadInteraction,
   type CancelIssueThreadInteraction,
