@@ -239,6 +239,21 @@ section in the Observability contract.
 
 ## Execution recovery
 
+Cancelled runs retain `resultJson.cancellation`: a closed `source` label
+(`operator`, `queued_message`, `shutdown`, `provider`, `transport`,
+`control_plane`, or `unknown`), whether the stop was expected, the initiator,
+reason, and recording time. Recorded stop intent survives adapter completion.
+The local lifecycle event includes this evidence. Started cancellations without
+an expected stop are also reported to Sentry; its cancellation diagnostics contain
+only source, expectedness, and initiator type, never initiator IDs or reason text.
+Historical ambiguous cancellations stay `unknown` and do not authorize replay.
+
+Provider tool-definition validation failures use
+`provider_tool_definition_invalid` / `configuration`. Automatic retry and
+continuation recovery stop until the configuration is repaired. Classification
+uses raw provider diagnostics in memory before redaction; stored diagnostics
+remain redacted and bounded.
+
 Provider identity diagnostics remain in the local run log. They record the notification method, expected and received thread/turn identifiers, and the classification (root, verified descendant, stale, unrelated informational, or invalid authoritative). They omit the original provider payload and credentials. Repeated informational notices are bounded.
 
 Ignored unrelated Codex notifications use `harness.diagnostic` with code

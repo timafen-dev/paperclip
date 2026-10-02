@@ -3036,6 +3036,22 @@ describe("gemini ACP flag selection", () => {
 });
 
 describe("ACP activity diagnostics", () => {
+  it("classifies rejected definitions before redaction and overrides a transient adapter label", async () => {
+    const root = await makeTempRoot(), cwd = path.join(root, "worktree");
+    await fs.mkdir(cwd, { recursive: true });
+    const execute = createAcpxEngineExecutor({
+      classifyTerminalSessionFailure: () => ({ errorCode: "claude_transient_upstream", errorFamily: "transient_upstream" }),
+      createRuntime: () => ({ ...buildRuntime(), startTurn: (options: { onTerminalSessionFailure: (failure: unknown) => void }) => {
+        options.onTerminalSessionFailure({ category: "service", details: "API Error: 400 tools.17.custom.name: String should have at most 128 characters" });
+        return { events: (async function* () {})(), result: Promise.resolve({ status: "failed", error: new Error("turn failed") }), cancel: async () => {} };
+      } }) as never,
+    });
+    const result = await execute({ runId: "invalid-definition", agent: { id: "agent-1", companyId: "company-1" }, runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir: path.join(root, "state"), cwd, env: { SECRET: "128" } },
+      context: {}, onMeta: async () => {}, onLog: async () => {} } as never);
+    expect(result).toMatchObject({ errorCode: "provider_tool_definition_invalid", errorFamily: "configuration" });
+    expect(JSON.stringify(result.resultJson?.terminalSessionFailure)).not.toContain("128");
+  });
   it.each(["terminal", "relay_error", "no_events"])(
     "snapshots %s activity before usage reads, failure logging, and cleanup", async (outcome) => {
       const root = await makeTempRoot();

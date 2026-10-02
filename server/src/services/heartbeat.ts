@@ -5,6 +5,8 @@ import { AgentDirectoryReuseInvalidatedError, isAgentDirectoryCopy } from "./age
 
 import type { PaperclipTurnContext } from "@paperclipai/adapter-utils/server-utils";
 import { restoreNativeWorkspaceBestEffort } from "./native-runtime/native-workspace-best-effort.js";
+import { ASSIGNED_MCP_SERVER_NAME } from "./mcp-tool-names.js";
+import { cancellationResultJson, canContinueCancelledRun, readRunCancellation, requestedRunCancellation } from "./run-cancellation.js";
 import {
   withNativeWorkspaceFinalizationOwnership,
   NativeWorkspaceFinalizationBusyError,
@@ -3495,6 +3497,27 @@ const heartbeatRunSafeResultJsonColumn = sql<Record<string, unknown> | null>`
         'workspaceRestoreFailure', case when ${heartbeatRuns.resultJson} ->> 'workspaceRestoreFailure'
           in ('restore_permission_denied', 'restore_lock_timeout', 'restore_unsafe_archive', 'restore_failed')
           then ${heartbeatRuns.resultJson} -> 'workspaceRestoreFailure' end,
+        'cancellation', case when jsonb_typeof(${heartbeatRuns.resultJson} -> 'cancellation') = 'object'
+          then jsonb_strip_nulls(jsonb_build_object(
+            'source', case when ${heartbeatRuns.resultJson} #>> '{cancellation,source}'
+              in ('operator', 'queued_message', 'shutdown', 'provider', 'transport', 'control_plane', 'unknown')
+              then ${heartbeatRuns.resultJson} #> '{cancellation,source}' end,
+            'expected', case when jsonb_typeof(${heartbeatRuns.resultJson} #> '{cancellation,expected}') = 'boolean'
+              then ${heartbeatRuns.resultJson} #> '{cancellation,expected}' end,
+            'initiator', jsonb_strip_nulls(jsonb_build_object(
+              'type', case when ${heartbeatRuns.resultJson} #>> '{cancellation,initiator,type}' in ('user', 'agent', 'system', 'provider')
+                then ${heartbeatRuns.resultJson} #> '{cancellation,initiator,type}' end,
+              'id', left(${heartbeatRuns.resultJson} #>> '{cancellation,initiator,id}', 128)
+            )),
+            'reason', left(${heartbeatRuns.resultJson} #>> '{cancellation,reason}', 512),
+            'recordedAt', left(${heartbeatRuns.resultJson} #>> '{cancellation,recordedAt}', 64)
+          )) end,
+        'acpToolInventoryComplete', case when jsonb_typeof(${heartbeatRuns.resultJson} -> 'acpToolInventoryComplete') = 'boolean'
+          then ${heartbeatRuns.resultJson} -> 'acpToolInventoryComplete' end,
+        'acpPendingToolCount', case when jsonb_typeof(${heartbeatRuns.resultJson} -> 'acpPendingToolCount') = 'number'
+          and length(${heartbeatRuns.resultJson} ->> 'acpPendingToolCount') < 16
+          then ${heartbeatRuns.resultJson} -> 'acpPendingToolCount' end,
+        'errorFamily', left(${heartbeatRuns.resultJson} ->> 'errorFamily', 32),
         'finalResponseRecorded', case when jsonb_typeof(${heartbeatRuns.resultJson} -> 'finalResponseRecorded') = 'boolean'
           then ${heartbeatRuns.resultJson} -> 'finalResponseRecorded' end,
         'executionBeforeRestore', case when jsonb_typeof(${heartbeatRuns.resultJson} -> 'executionBeforeRestore') = 'object'
@@ -4872,7 +4895,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
 
   return [
     {
-      name: "paperclip-assigned",
+      name: ASSIGNED_MCP_SERVER_NAME,
       url: `${paperclipApiBaseUrl()}/mcp/gateways/${gateway!.gatewayPublicId}`,
       token: token.token,
       connectionId: `assignment:${assignmentDigest}`,
@@ -10604,6 +10627,12 @@ export function heartbeatService(
       if (!sourceId || !isUuidLike(sourceId)) continue;
       const run = await getRun(sourceId);
       if (!run || run.companyId !== wake.companyId || run.agentId !== wake.agentId) continue;
+      if (canContinueCancelledRun(run)) {
+        await resumeSavedLegacyComments(wake.companyId, wake.id).catch(err => {
+          logger.warn({ err, runId: run.id }, "failed to resume saved input after provider cancellation");
+        });
+        continue;
+      }
       await resumeRemoteStopComments(run, wake.id).catch(err => {
         logger.warn({ err, runId: run.id }, "failed to resume saved execution-wait message");
       });
@@ -12857,6 +12886,9 @@ export function heartbeatService(
 
     // Cancelling a queued run that never acquired provider execution is
     // positive bootstrap evidence. It must not hold unrelated queued messages.
+    if (previousStatus && (status === "cancelled" || status === "interrupted")) {
+      patch = { ...patch, resultJson: cancellationResultJson(previousStatus, status, patch?.resultJson, patch?.errorCode, patch?.error) };
+    }
     if (
       status === "cancelled" &&
       previousStatus?.status === "queued" &&
@@ -12940,6 +12972,10 @@ export function heartbeatService(
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
+
+    if (previousStatus && (status === "cancelled" || status === "interrupted")) {
+      patch = { ...patch, resultJson: cancellationResultJson(previousStatus, status, patch?.resultJson, patch?.errorCode, patch?.error) };
+    }
 
     // Cancelling a queued run that never acquired provider execution is
     // positive bootstrap evidence. It must not hold unrelated queued messages.
@@ -15357,6 +15393,11 @@ export function heartbeatService(
       delayMs?: number;
     },
   ) {
+    if (run.errorCode === "provider_tool_definition_invalid") {
+      return { outcome: "not_scheduled" as const,
+        reason: "Repair the invalid tool definitions before starting a new attempt.",
+        issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
+    }
     if (Array.isArray(run.contextSnapshot?.chatCompletionDeliveryIds) &&
         run.contextSnapshot.chatCompletionDeliveryIds.some(id => typeof id === "string")) {
       return { outcome: "not_scheduled" as const, reason: "The completion outbox owns this reply's retry budget and publication identity.",
@@ -25255,6 +25296,8 @@ export function heartbeatService(
                 : "failed";
         } else if (adapterResult.timedOut) {
           outcome = "timed_out";
+        } else if (adapterResult.resultJson?.status === "cancelled") {
+          outcome = "cancelled";
         } else if (
           (adapterResult.exitCode ?? 0) === 0 &&
           !adapterResult.errorMessage &&
@@ -25287,7 +25330,7 @@ export function heartbeatService(
         const normalizedUsage = sessionUsageResolution.normalizedUsage;
         const runErrorMessage =
           outcome === "cancelled"
-            ? (latestRun?.error ?? adapterResult.errorMessage ?? "Cancelled")
+            ? redactCurrentUserText(latestRun?.error ?? adapterResult.errorMessage ?? "Cancelled", currentUserRedactionOptions)
             : outcome === "succeeded"
               ? null
               : redactCurrentUserText(
@@ -25402,7 +25445,7 @@ export function heartbeatService(
               } as Record<string, unknown>)
             : null;
 
-        const persistedResultJson = mergeHeartbeatRunResultJson(
+        const persistedResultJson = cancellationResultJson(latestRun ?? run, outcome, mergeHeartbeatRunResultJson(
           mergeRunStopMetadataForAgent(agent, outcome, {
             resultJson: mergeAdapterRecoveryMetadata({
               resultJson: {
@@ -25422,7 +25465,7 @@ export function heartbeatService(
             errorMessage: runErrorMessage,
           }),
           adapterResult.summary ?? null,
-        );
+        ), runErrorCode, runErrorMessage);
 
         const finalRunPatch: Partial<typeof heartbeatRuns.$inferInsert> = {
           finishedAt: new Date(),
@@ -25467,6 +25510,7 @@ export function heartbeatService(
               .update(heartbeatRuns)
               .set({
                 ...finalRunPatch,
+                resultJson: cancellationResultJson(persistedRunWrite.run, status, finalRunPatch.resultJson, runErrorCode, runErrorMessage),
                 finishedAt:
                   persistedRunWrite.run.finishedAt ?? finalRunPatch.finishedAt,
                 updatedAt: new Date(),
@@ -25519,6 +25563,7 @@ export function heartbeatService(
             payload: {
               status,
               exitCode: adapterResult.exitCode,
+              ...(readRunCancellation(finalizedRun.resultJson) ? { cancellation: readRunCancellation(finalizedRun.resultJson) } : {}),
             },
           });
           try {
@@ -26811,7 +26856,7 @@ export function heartbeatService(
       if (opts.requestedByActorType !== "user" || !opts.requestedByActorId ||
           reason !== "retry_failed_run" || source !== "on_demand" || triggerDetail !== "manual" ||
           !failed || failed.companyId !== agent.companyId || failed.agentId !== agentId ||
-          !["failed", "timed_out"].includes(failed.status) ||
+          (!["failed", "timed_out"].includes(failed.status) && !canContinueCancelledRun(failed)) ||
           (failed.nativeIssueId ?? readNonEmptyString(failed.contextSnapshot?.issueId)) !== issueId) {
         throw conflict("The selected failed run cannot be retried for this task.");
       }
@@ -29386,6 +29431,7 @@ export function heartbeatService(
       return run;
     const agent = await getAgent(run.agentId);
     const errorCode = options.errorCode ?? "cancelled";
+    const cancellation = requestedRunCancellation(options.resultJson ?? {}, reason);
 
     const pendingProcessCancellation = processRunCancellationSettlements.get(
       run.id,
@@ -29415,6 +29461,7 @@ export function heartbeatService(
         resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
           ${JSON.stringify(options.errorCode === "issue_reassigned" && options.resultJson?.reassignmentStopConfirmed === true
             ? { reassignmentStopRequested: true } : {})}::jsonb ||
+          ${JSON.stringify({ cancellation })}::jsonb ||
           jsonb_build_object('startupCancellation', jsonb_build_object(
             'requestedAt', ${new Date().toISOString()}::text,
             'beforeNativeSelection', ${heartbeatRuns.runtimeMode} = 'legacy'
@@ -29428,7 +29475,7 @@ export function heartbeatService(
       if (!fenced) return getRun(runId);
       run = fenced;
     }
-    const resultJson = agent
+    const resultJson = { ...(agent
       ? {
           ...mergeRunStopMetadataForAgent(agent, "cancelled", {
             resultJson: parseObject(run.resultJson),
@@ -29437,7 +29484,7 @@ export function heartbeatService(
           }),
           ...(options.resultJson ?? {}),
         }
-      : options.resultJson;
+      : options.resultJson), cancellation };
 
     try {
       let releaseProcessCancellation: (() => void) | undefined;
@@ -29639,7 +29686,7 @@ export function heartbeatService(
           stream: "system",
           level: "warn",
           message: options.eventMessage ?? "run cancelled",
-          ...(options.eventPayload ? { payload: options.eventPayload } : {}),
+          payload: { ...options.eventPayload, cancellation: readRunCancellation(cancelled.resultJson) },
         });
         await releaseIssueExecutionAndPromote(cancelled, {
           suppressImmediateRecovery: options.suppressImmediateRecovery,
@@ -29682,6 +29729,9 @@ export function heartbeatService(
           continue;
         }
         if (run.runtimeMode === "native") {
+          await db.update(heartbeatRuns).set({ resultJson:
+            sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ cancellation: requestedRunCancellation({}, reason) })}::jsonb`,
+          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, run.status)));
           await cancelHeartbeatNativeRun({
             db,
             runId: run.id,
@@ -29699,15 +29749,13 @@ export function heartbeatService(
           finishedAt: new Date(),
           error: reason,
           errorCode,
-          ...(agent
-            ? {
-                resultJson: mergeRunStopMetadataForAgent(agent, "cancelled", {
-                  resultJson: persistedCancellationResult,
-                  errorCode,
-                  errorMessage: reason,
-                }),
-              }
-            : {}),
+          resultJson: {
+            ...persistedCancellationResult,
+            ...(agent ? mergeRunStopMetadataForAgent(agent, "cancelled", {
+              resultJson: persistedCancellationResult, errorCode, errorMessage: reason,
+            }) : {}),
+            cancellation: readRunCancellation(persistedCancellationResult) ?? requestedRunCancellation({}, reason),
+          },
         });
 
         await setWakeupStatus(run.wakeupRequestId, "cancelled", {
