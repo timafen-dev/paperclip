@@ -139,7 +139,13 @@ tool, input, permission, and terminal events require the exact active binding.
 A package-local payload boundary decodes events only after that scope check. It
 validates control identities, terminal status, question sets, and the admitted
 runtime event types and bounded fields. It redacts diagnostic and retained
-event values again before they can enter provider state.
+event values again before they can enter provider state. Authoritative semantic
+tool arguments are validated for transport bounds and forwarded unchanged,
+including credential-bearing document and instruction content. The provider
+harness owns credential policy; redaction of logs and audit previews must not
+reject or rewrite execution arguments. Diagnostic detection requires explicit
+credential fields/assignments or recognizable key, Bearer, JWT, or PEM formats,
+not ordinary prose such as "credential handling" or dotted filenames.
 
 Validated ACPX runtime events normalize into the same provider-neutral activity
 families as the direct Codex transport. Reasoning contents stay private. Tool

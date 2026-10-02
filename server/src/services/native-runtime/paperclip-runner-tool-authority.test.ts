@@ -28,6 +28,7 @@ import { READ_CURRENT_WAKE_COMMENTS_TOOL_NAME } from "./current-wake-comments.js
 import { CAPABILITY_SEMANTIC_TOOL_CATALOG, runnerCodexDynamicToolsFit } from "../../vendor/paperclip-runner/index.js";
 
 describe("PaperclipRunnerToolAuthority", () => {
+  const credentialDocumentBody = "Use a secret manager for credential handling.\nAuthorization: Bearer intentional-document-credential";
   let temporary: Awaited<
     ReturnType<typeof startEmbeddedPostgresTestDatabase>
   > | null = null;
@@ -802,6 +803,7 @@ describe("PaperclipRunnerToolAuthority", () => {
   });
 
   it("writes a real revisioned document and replays the mutation receipt", async () => {
+    const body = credentialDocumentBody;
     const authority = new PaperclipRunnerToolAuthority(db, {
       companyId,
       agentId,
@@ -815,7 +817,7 @@ describe("PaperclipRunnerToolAuthority", () => {
         idempotencyKey: "write-plan-1",
         key: "plan",
         title: "Execution plan",
-        body: "Use the real document service.",
+        body,
         // Provider bridges may serialize nullable string inputs as the literal
         // "null". The protocol boundary treats that as document creation.
         baseRevisionId: "null",
@@ -831,7 +833,7 @@ describe("PaperclipRunnerToolAuthority", () => {
     expect(first).toMatchObject({
       disposition: "applied",
       created: true,
-      document: { key: "plan", body: "Use the real document service." },
+      document: { key: "plan", body },
     });
     expect(
       await db
@@ -839,6 +841,8 @@ describe("PaperclipRunnerToolAuthority", () => {
         .from(documents)
         .where(eq(documents.companyId, companyId)),
     ).toHaveLength(1);
+    expect(await documentService(db).getIssueDocumentByKey(issueId, "plan"))
+      .toMatchObject({ body: credentialDocumentBody });
     const documentActivity = await db
       .select()
       .from(activityLog)
@@ -960,7 +964,7 @@ describe("PaperclipRunnerToolAuthority", () => {
         documentId: plan!.id,
         revisionId: plan!.latestRevisionId,
         revisionNumber: plan!.latestRevisionNumber,
-        markdown: "Use the real document service.",
+        markdown: credentialDocumentBody,
       },
     });
   });
