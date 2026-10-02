@@ -20318,6 +20318,30 @@ export function heartbeatService(
       run = claimed;
     }
 
+    const instructionCleanupRun = run;
+    let instructionCleanupDeferred = false;
+    const releaseInstructionCopy = async () => {
+      // Cleanup is retried from the durable working-copy receipt by the
+      // recovery sweep. It must not replace the provider result (or prevent
+      // lease release), and a timeout must not be repeated in outer teardown.
+      if (instructionCleanupDeferred) return;
+      try {
+        await instructionCopies.release(instructionCleanupRun.companyId, instructionCleanupRun.id);
+      } catch (err) {
+        instructionCleanupDeferred = true;
+        logger.warn({ err, runId: instructionCleanupRun.id }, "Agent file cleanup deferred; run outcome preserved");
+        await appendRunEvent(instructionCleanupRun, {
+          eventType: "instruction_cleanup",
+          stream: "system",
+          level: "warn",
+          message: "Agent file cleanup was deferred. The run outcome and file-save receipt are unchanged.",
+          payload: { state: "deferred" },
+        }).catch((eventError) => {
+          logger.warn({ err: eventError, runId: instructionCleanupRun.id }, "Failed to record deferred agent file cleanup");
+        });
+      }
+    };
+
     if (
       runOptions.nativeLeaseOwner &&
       run.runtimeMode === "native" &&
@@ -25211,7 +25235,7 @@ export function heartbeatService(
             );
           }
           await nativeInstructionReservation?.release();
-          await instructionCopies.release(agent.companyId, run.id);
+          await releaseInstructionCopy();
         }
         // Reconcile the referenced-project set against the real remote staging outcome. A referenced
         // project can pass authorization and clone locally at run prep, then fail to stage into the
@@ -26617,7 +26641,7 @@ export function heartbeatService(
               message: "Instruction edits could not be recovered before environment release. No instruction save is claimed.",
               payload: { state: "unavailable", code: uncapturedInstructions.errorCode } });
           }
-          await instructionCopies.release(run.companyId, run.id);
+          await releaseInstructionCopy();
           await releaseEnvironmentLeasesForRun({
             runId: run.id,
             companyId: run.companyId,

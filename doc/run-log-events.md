@@ -357,3 +357,10 @@ Successful checkpoints can include `checkpointStats`: `scannedEntries`,
 capture, not cumulative traffic or an atomic snapshot of background writers.
 They contain no file contents. The receipt remains in the instance run log;
 it adds no Paperclip Telemetry or OpenTelemetry export.
+
+If instruction-copy release throws, `instruction_cleanup` records a warning
+with payload `{ "state": "deferred" }`. The existing working-copy recovery sweep
+retries cleanup. This event preserves the run outcome and does not claim a file
+save; `instruction_save` remains authoritative for collection. The event contains
+no raw exception, host path, file contents, or lock-owner metadata. Failure to
+write the warning must not replace the provider outcome or stop lease release.
