@@ -6992,7 +6992,45 @@ export function createToolGatewayService(
         clientMetadata,
       });
     }
-    let agentId = row.gateway.agentId;
+    const nativeMetadata = row.gateway.metadata;
+    const [profile] = await db.select({
+      profileKey: toolProfiles.profileKey,
+      status: toolProfiles.status,
+      source: sql<string | null>`${toolProfiles.metadata}->>'source'`,
+      agentId: sql<string | null>`${toolProfiles.metadata}->>'agentId'`,
+      assignmentDigest: sql<string | null>`${toolProfiles.metadata}->>'assignmentDigest'`,
+    }).from(toolProfiles).where(and(
+      eq(toolProfiles.id, row.gateway.profileId),
+      eq(toolProfiles.companyId, row.gateway.companyId),
+    )).limit(1);
+    // The immutable native profile also identifies legacy assignments when an
+    // update has cleared the gateway metadata. Missing metadata must fail closed.
+    const nativeAssignment = Object.hasOwn(nativeMetadata ?? {}, "nativeRuntimeAssignmentDigest") ||
+      profile?.profileKey.startsWith("native:") || profile?.source === "paperclip_runner";
+    const nativeOwner = nativeMetadata?.agentId;
+    if (nativeAssignment && (
+      typeof nativeOwner !== "string" || !uuidPattern.test(nativeOwner) ||
+      typeof nativeMetadata?.nativeRuntimeAssignmentDigest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(nativeMetadata.nativeRuntimeAssignmentDigest) ||
+      (row.gateway.agentId && row.gateway.agentId !== nativeOwner) ||
+      row.token.subjectType !== "heartbeat_run"
+    )) {
+      return recordNamedGatewayAuthFailure({
+        gatewayId: input.gatewayId, gatewayPublicId: input.gatewayPublicId,
+        bearerToken, reasonCode: "gateway_token_run_context_invalid", clientMetadata,
+      });
+    }
+    if (nativeAssignment) {
+      if (profile?.status !== "active" || profile.source !== "paperclip_runner" ||
+          profile.agentId !== nativeOwner ||
+          profile.assignmentDigest !== nativeMetadata!.nativeRuntimeAssignmentDigest) {
+        return recordNamedGatewayAuthFailure({
+          gatewayId: input.gatewayId, gatewayPublicId: input.gatewayPublicId,
+          bearerToken, reasonCode: "gateway_token_run_context_invalid", clientMetadata,
+        });
+      }
+    }
+    let agentId = row.gateway.agentId ?? (nativeAssignment ? nativeOwner as string : null);
     let runId: string | null = null;
     let responsibleUserId: string | null = null;
     let issueId = row.gateway.issueId;
@@ -7036,7 +7074,7 @@ export function createToolGatewayService(
           clientMetadata,
         });
       }
-      if (row.gateway.agentId && row.gateway.agentId !== run.agentId) {
+      if (agentId && agentId !== run.agentId) {
         return recordNamedGatewayAuthFailure({
           gatewayId: input.gatewayId,
           gatewayPublicId: input.gatewayPublicId,
