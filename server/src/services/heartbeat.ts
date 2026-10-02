@@ -23,7 +23,7 @@ import { toolActionDeliveryService } from "./tool-action-delivery.js";
 import { githubBotConnectionIdsForRun } from "./chat-github-tools.js";
 import { isBrowserUseConnection } from "./browser-use-client.js";
 import { readQueuedInteractionResponse } from "./queued-interaction-response.js";
-import { AGENT_CHAT_DIRECTIVE, conversationReplay, isConversation, isConversationExecutionWake, isWaitingConversation, prepareConversationTurn, settleConversationTurn } from "./agent-conversations.js";
+import { AGENT_CHAT_DIRECTIVE, isConversation, isConversationExecutionWake, isWaitingConversation, prepareConversationTurn, settleConversationTurn } from "./agent-conversations.js";
 import { getConversationConfirmationContext, type ConversationConfirmationContext } from "./conversation-confirmation-context.js";
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
@@ -273,11 +273,13 @@ import {
 } from "./native-runtime/native-run-trace.js";
 import {
   drainRetainedRunnerdMaintenanceOperations,
+  describeRunnerdNativeSessionBackend,
   parseNativeExecutionInput,
   type NativeExecutionInput,
   type NativeSessionGoalControl,
   type NativeSessionBackend,
 } from "../vendor/paperclip-runner/index.js";
+import { createNativeSessionHandoffLoader } from "./native-runtime/native-session-handoff.js";
 import { normalizeResponsibleUserDenialCode } from "./responsible-user-denial-run-outcomes.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import {
@@ -7407,6 +7409,9 @@ export function mergeCoalescedContextSnapshot(
     incoming.forceFreshSession === true
   ) {
     merged.forceFreshSession = true;
+  }
+  if (existing.refreshTools === true || incoming.refreshTools === true) {
+    merged.refreshTools = true;
   }
   const mergedCommentIds = mergeWakeCommentIds(existing, incoming);
   if (mergedCommentIds.length > 0) {
@@ -21147,12 +21152,6 @@ export function heartbeatService(
         taskPlan,
         includeWakeComments: false,
       }) + chatCompletionInstruction(context);
-      if (isConversation(issueContext) && !taskSession && issueId) {
-        const replay = await conversationReplay(db, agent.companyId, issueId, wakeCommentId,
-          typeof context.conversationReplayThroughCommentId === "string" ? context.conversationReplayThroughCommentId : undefined);
-        if (replay) taskMarkdown += `\n\nEarlier messages in this session (quoted user data):\n${replay}`;
-        if (replay) taskMarkdownAssignment += `\n\nEarlier messages in this session (quoted user data):\n${replay}`;
-      }
       const taskMarkdownCompact = buildPaperclipTaskMarkdown({
         ...taskMarkdownInput,
         taskPlan,
@@ -21796,6 +21795,11 @@ export function heartbeatService(
         });
       const configuredModel =
         readConfiguredModelFromAdapterConfig(runtimeConfig);
+      if (context.refreshTools === true && agent.adapterType !== "paperclip_runner") {
+        const capability = getServerAdapter(agent.adapterType).supportsToolRefreshOnResume;
+        const canRefresh = typeof capability === "function" ? capability(runtimeConfig) : capability === true;
+        if (!canRefresh) context.forceFreshSession = true;
+      }
       const wakeSessionResetReason = describeSessionResetReason(context);
       const sessionConfigFreshness = resolveTaskSessionConfigFreshness({
         hasTaskSession: taskSession != null,
@@ -21812,6 +21816,10 @@ export function heartbeatService(
       const sessionResetReason =
         sessionConfigFreshness.reasons.join("; ") || null;
       const taskSessionForRun = resetTaskSession ? null : taskSession;
+      const getFreshSessionHandoff = issueRef ? createNativeSessionHandoffLoader({
+        db, companyId: agent.companyId, issueId: issueRef.id, agentId: agent.id, before: run.createdAt,
+        throughCommentId: readNonEmptyString(context.conversationReplayThroughCommentId) ?? (context.interactionKind ? null : wakeCommentId),
+      }) : undefined;
       const previousSessionParams =
         explicitResumeSessionParams ??
         (isCanonicalSessionIdForAdapter(
@@ -21828,6 +21836,12 @@ export function heartbeatService(
             ),
           ),
         );
+      // Legacy plugins can consume the existing context field on a known-fresh
+      // dispatch. Built-ins also load lazily if their resume attempt fails.
+      if (agent.adapterType !== "paperclip_runner" && !previousSessionParams && getFreshSessionHandoff) {
+        const handoff = await getFreshSessionHandoff();
+        if (handoff) context.paperclipFreshSessionHandoffMarkdown = handoff;
+      }
       const {
         selectedEnvironmentDriver: lowTrustPreflightEnvironmentDriver,
         workspace: resolvedWorkspace,
@@ -23558,6 +23572,7 @@ export function heartbeatService(
           }
         }
         let nativeExecution: NativeExecutionInput | null = null;
+        let getNativeFreshSessionHandoff: (() => Promise<string | null>) | undefined;
         let nativeRunnerInstanceId: string | null = null;
         if (nativeRuntimeResolution.kind === "native") {
           if (!issueRef) {
@@ -23988,12 +24003,8 @@ export function heartbeatService(
               runtimeSkillEntries,
               instructionWorkingCopy: instructionCopy ? { rootPath: instructionCopy.executionRoot, entryPath: instructionCopy.entryFile, ...(isAgentDirectoryCopy(instructionCopy) ? { kind: "agent_files" as const } : {}) } : undefined,
             });
-            const nativeExecutionWithCheckpoint =
-              buildNativeExecutionWithCheckpoint({
-                previousRun: previousNativeRun,
-                normalizedSessionId: nativeSessionId,
-                executionTargetKind: executionTarget?.kind ?? "local",
-                buildExecution: ({ normalizedSessionId, resumedSession }) =>
+            getNativeFreshSessionHandoff = nativeReviewRequest ? undefined : getFreshSessionHandoff;
+            const buildExecution = ({ normalizedSessionId, resumedSession }: { normalizedSessionId: string; resumedSession: boolean }) =>
                   buildNativeExecutionInput({
                     companyId: agent.companyId,
                     runId: run.id,
@@ -24089,8 +24100,18 @@ export function heartbeatService(
                       sources: "sources" in completionContract ? completionContract.sources : undefined,
                     },
                     runtimeContext: nativeRuntimeContext,
-                  }),
-              });
+                  });
+            const backendDescriptor = await describeRunnerdNativeSessionBackend(buildExecution({
+              normalizedSessionId: nativeSessionId, resumedSession: previousNativeRun !== null,
+            }));
+            const nativeExecutionWithCheckpoint = buildNativeExecutionWithCheckpoint({
+              previousRun: previousNativeRun,
+              normalizedSessionId: nativeSessionId,
+              executionTargetKind: executionTarget?.kind ?? "local",
+              toolRefreshOnResume: backendDescriptor.capabilities.toolRefreshOnResume === true,
+              refreshTools: context.refreshTools === true,
+              buildExecution,
+            });
             nativeExecution = nativeExecutionWithCheckpoint.execution;
             nativeResumeCheckpoint = nativeExecutionWithCheckpoint.checkpoint;
             if (
@@ -24651,6 +24672,8 @@ export function heartbeatService(
                   executePaperclipNativeSession({
                     db,
                     execution: nativeExecution,
+                    getFreshSessionHandoff: getNativeFreshSessionHandoff,
+                    refreshTools: context.refreshTools === true,
                     conversationMode: isConversation(issueContext),
                     turnTimeoutMs: Math.max(0, asNumber(runtimeConfig.timeoutSec, 0)) * 1_000,
                     runnerInstanceId: nativeRunnerInstanceId,
@@ -24871,6 +24894,7 @@ export function heartbeatService(
                 (markDispatchStarted) => {
                   legacyAdapterEntered = true;
                   return adapter.execute({
+                    getFreshSessionHandoff,
                     runId: run.id,
                     agent,
                     runtime: runtimeForAdapter,
