@@ -1,3 +1,5 @@
+import { nativeCompletionTasks, nativeCompletionDefinitionDigest } from "./native-completion-cases.js";
+import { nativeCompletionProfile, NATIVE_COMPLETION_BUDGET_CENTS } from "./native-completion-defaults.js";
 import { chatConfirmationTasks } from "./chat-cases.js";
 import { hiringTemplateTasks, hiringTemplateProfile, hiringTemplateDefinitionDigest } from "./hiring-template-cases.js";
 import { instructionPersistenceTask } from "./instruction-persistence.js";
@@ -1192,6 +1194,16 @@ export const runnerSuites: readonly RunnerSuiteFixture[] = [
       .filter(task => !["build-revise", "delegate-feedback", "recover-controller", "create-skill-studio"].includes(task.id))
       .map(task => `everyday-workflows.${profile.id}.daytona.${task.id}`))],
     definitionMetadata: { version: 4, instructions: "production", grading: "outcome-and-invariants", scheduling: "explicit-only" },
+  },
+  {
+    id: "native-completion", label: "Native completion guidance", manualOnly: true,
+    description: "Production-default assigned-skill document completion and concrete whole-task blocking, with independent native result/final ordering.",
+    groups: ["native", "local"],
+    profiles: runnerProfiles.filter(profile => ["runner-codex", "runner-acpx-claude", "runner-opencode"].includes(profile.id)).map(nativeCompletionProfile),
+    environments: [localEnvironment], tasks: nativeCompletionTasks, expectedMatrixSize: 6,
+    definitionMetadata: { version: 1, fixtureDigest: nativeCompletionDefinitionDigest(), instructions: "unchanged-master-production-default",
+      providerTurns: 6, maximumAttemptsPerCell: 1, automaticRetryPolicy: "single_attempt", budgetMonthlyCents: NATIVE_COMPLETION_BUDGET_CENTS,
+      grading: "original-assigned-skill-durable-document-plus-native-disposition-and-observable-final-order", scheduling: "explicit-only" },
   },
   {
     id: "context-integrity",
