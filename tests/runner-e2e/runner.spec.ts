@@ -18,6 +18,8 @@ import { runContinuationFlow } from "./continuation-flow.js";
 import { runEverydayFlow } from "./everyday-flow.js";
 import { gradeTaskTitle } from "./task-titles.js";
 import { runContextIntegrityFlow } from "./context-integrity-flow.js";
+import { captureStockHarness, gradeStockHarness, gradeStockHire } from "./stock-harness.js";
+import { verifyStockHarnessPreflight, STOCK_PREFLIGHT_ENV } from "./stock-harness-admission.js";
 import { createTaskThroughUi, submitTaskReply } from "./user-actions.js";
 
 import { runFirstTaskFlow, setupFirstTaskFixtures } from "./first-task-flow.js";
@@ -825,6 +827,10 @@ for (const execution of executions) {
     });
 
     try {
+      if (execution.suite.id === "stock-harness") {
+        const receipt = verifyStockHarnessPreflight(process.env[STOCK_PREFLIGHT_ENV]);
+        await writeSanitizedJson(snapshotsDir, "stock-harness-preflight.json", receipt, secrets);
+      }
       const experimental = await api.patch<{
         enableNativeRunner: boolean;
       }>("/api/instance/settings/experimental", {
@@ -863,6 +869,18 @@ for (const execution of executions) {
           api.get<Array<{ id: string }>>(`/api/companies/${fixtures.company.id}/agents`), nativeWorkspaceDigest(),
         ]);
         nativeInitial = { issueIds: issues.map(value => value.id), agentIds: agents.map(value => value.id), workspaceDigest };
+      }
+
+      if (execution.suite.id === "stock-harness") {
+        const hire = await captureStockHarness({ api, companyId: fixtures.company.id,
+          agentId: fixtures.agent.id, generation: execution.profile.generation, runIds: [] });
+        const checks = gradeStockHire(hire);
+        await writeSanitizedJson(snapshotsDir, "stock-harness-hire.json", {
+          capturePhase: "before-provider", ...hire, checks,
+        }, secrets);
+        const failed = checks.filter(check => !check.passed);
+        if (failed.length) throw new Error(`Stock hire matcher failures: ${failed.map(check => check.id).join(", ")}`);
+
       }
 
       if (execution.suite.id === "api-response-reading") {
@@ -2763,6 +2781,24 @@ for (const execution of executions) {
             const companyRuns = await api.get<RunRecord[]>(`/api/companies/${fixtures.company.id}/heartbeat-runs?limit=100`);
             selectedRuns = await Promise.all(companyRuns.map(run => api.get<RunRecord>(`/api/heartbeat-runs/${run.id}`)));
             await writeSanitizedJson(snapshotsDir, execution.task.flow === "first_task" ? "first-task-final-run-ledger.json" : "chat-final-run-ledger.json", selectedRuns, secrets);
+          }
+          if (execution.suite.id === "stock-harness") {
+            try {
+              const stock = await captureStockHarness({ api, companyId: fixtures.company.id,
+                agentId: fixtures.agent.id, generation: execution.profile.generation,
+                runIds: selectedRuns.map(run => run.id) });
+              const checks = gradeStockHarness(stock);
+              matcherResults.push(...checks.map(check => ({ matcher: { kind: "json_path" as const,
+                path: `stockHarness.${check.id}`, expected: true }, passed: check.passed, detail: check.detail })));
+              await writeSanitizedJson(snapshotsDir, "stock-harness.json", { ...stock, checks }, secrets);
+              const failures = checks.filter(check => !check.passed);
+              if (failures.length && !primaryError) primaryError = new Error(`Stock harness matcher failures: ${failures.map(check => check.id).join(", ")}`);
+            } catch (error) {
+              await writeSanitizedJson(snapshotsDir, "stock-harness-evidence-error.json", {
+                error: error instanceof Error ? error.message : String(error),
+              }, secrets);
+              if (!primaryError) primaryError = error;
+            }
           }
           await fixtures.teardown();
           cleanup = "passed";

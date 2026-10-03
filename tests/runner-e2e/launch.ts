@@ -52,6 +52,8 @@ import {
 } from "./types.js";
 import { assertRunnerE2EPrerequisites } from "./prerequisites.js";
 import { assertNativeCompletionSelection, prepareNativeCompletionPreflight, NATIVE_COMPLETION_PREFLIGHT_ENV } from "./native-completion-admission.js";
+import { prepareStockHarnessPreflight, STOCK_PREFLIGHT_ENV } from "./stock-harness-admission.js";
+
 import {
   reapNewDetachedDarwinSharedMemory,
   snapshotDarwinSharedMemory,
@@ -1084,13 +1086,17 @@ async function main() {
   // profiles remain discoverable, but cannot reach a provider.
   assertRunnerE2EPrerequisites(executions);
   assertNativeCompletionSelection(executions);
-  let nativeCampaignId: string | undefined;
+  const campaignId = cleanId(
+    process.env.PAPERCLIP_E2E_CAMPAIGN_ID ??
+      `local-${new Date().toISOString().replace(/[:.]/g, "-")}`,
+  );
+  const summaryDir = path.join(resultsRoot, campaignId);
+  await mkdir(summaryDir, { recursive: true });
   if (executions.some(execution => execution.suite.id === "native-completion")) {
-    nativeCampaignId = cleanId(process.env.PAPERCLIP_E2E_CAMPAIGN_ID ??
-      `local-${new Date().toISOString().replace(/[:.]/g, "-")}`);
-    const nativeCampaignDirectory = path.join(resultsRoot, nativeCampaignId);
-    await mkdir(nativeCampaignDirectory, { recursive: true });
-    process.env[NATIVE_COMPLETION_PREFLIGHT_ENV] = prepareNativeCompletionPreflight(nativeCampaignDirectory);
+    process.env[NATIVE_COMPLETION_PREFLIGHT_ENV] = prepareNativeCompletionPreflight(summaryDir);
+  }
+  if (executions.some(execution => execution.suite.id === "stock-harness")) {
+    process.env[STOCK_PREFLIGHT_ENV] = prepareStockHarnessPreflight(summaryDir);
   }
 
   await loadLocalEnvironment(process.env);
@@ -1113,12 +1119,7 @@ async function main() {
     );
   }
 
-  const campaignId = nativeCampaignId ?? cleanId(
-    process.env.PAPERCLIP_E2E_CAMPAIGN_ID ??
-      `local-${new Date().toISOString().replace(/[:.]/g, "-")}`,
-  );
-  const summaryDir = path.join(resultsRoot, campaignId);
-  await mkdir(summaryDir, { recursive: true });
+
   await writeFile(
     path.join(summaryDir, "invocation-policy.json"),
     `${JSON.stringify(

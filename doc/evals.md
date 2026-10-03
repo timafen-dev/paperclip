@@ -95,6 +95,14 @@ execution ID because `--all` excludes explicit-only suites. Each cell applies a
 1,000-cent company and agent budget hard stop before task creation and records
 both limits in its evidence.
 
+The explicit-only [stock-harness suite](../tests/runner-e2e/STOCK-HARNESS.md)
+reuses skill, ordered-continuation, and chat-restart journeys across eight local
+legacy/native profiles with production-default hires. It closes the custom QA
+manual coverage gap. Its required credential-free prerequisite maps vendor
+instruction layering, the tiny hire bundle, and shared startup/resume reductions
+to executable checks. The 24 live cells are configured; no live qualification is
+claimed from their setup or unit calibration.
+
 The explicit-only `agent-chat-stories` suite covers the experimental settings
 lifecycle for a configured native agent and follow-ups during active work. Its
 fixture-driven file wait and persisted-plan oracle are documented in the

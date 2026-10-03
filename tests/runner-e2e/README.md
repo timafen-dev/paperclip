@@ -444,6 +444,14 @@ pnpm test:e2e:runner -- --list --suite context-integrity
 pnpm test:e2e:runner -- --id context-integrity.runner-codex.local.ordered-comment-continuation
 ```
 
+`stock-harness` reuses ordered continuation, assigned-skill invocation, and chat
+restart journeys with production-default hires instead of the custom QA manual.
+Its 24 explicit local cells cover eight legacy/native profiles and are excluded
+from `--all`. Run `pnpm test:e2e:runner:stock-harness` for the credential-free
+instruction-layering, hire, and shared-prompt prerequisites. The
+[suite contract](STOCK-HARNESS.md) maps each change to its graders, budgets,
+evidence, and remaining qualification limits.
+
 Each hardening oracle has positive and plausible-negative calibration tests.
 The review grader parses the worker's saved JSON and compares both source values
 and the consistency verdict. Hiring requires one identity, correct reporting
