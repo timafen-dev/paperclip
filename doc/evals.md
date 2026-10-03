@@ -81,7 +81,9 @@ The explicit-only [production hiring templates suite](../tests/runner-e2e/README
 adds two local native Codex/Claude cells. It exercises API-created production
 CEO defaults, an explicitly requested hiring skill/reference read, a permanent
 coder hire, independently computed saved JSON fixtures and worker reuse.
-Each cell expects five turns. Source/read coverage and workflow outcome are
+Each cell requires five work turns and admits at most two strictly attributed
+server task-completion turns. Every actual run remains counted; unknown or
+extra-work turns fail. Source/read coverage and workflow outcome are
 separate: missing read provenance leaves the candidate/baseline pair
 uncomparable even if work succeeds. Baseline bundles and coder examples derive
 from their own source revision, without requiring candidate wording or length.
@@ -386,3 +388,5 @@ The explicit-only Product E2E `confirmation-replies` suite tests conversational
 approval and rejection, persisted message provenance, approval before execution,
 ambiguous proposals, and the existing card-click path with native Claude/Codex.
 See the [suite contract](../tests/runner-e2e/README.md#conversational-confirmation-replies-explicit-only).
+
+Hiring notification accounting now also requires exact completed action attribution. Missing native/provider ID mapping is uncomparable evidence; it must not be reported as a model task regression or waived through name/order matching. The fixture waits for both known completion callbacks and settled bracketed observations, including the gap before pending outbox work becomes a wake. Strict action replay and original machine verdicts are retained separately.
