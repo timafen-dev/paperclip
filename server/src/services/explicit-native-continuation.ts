@@ -169,14 +169,9 @@ export async function admitExplicitNativeContinuation(input: {
     const unusedAdmission = run.status === "cancelled" && !run.startedAt &&
       run.errorCode === "execution_reconciliation_required" &&
       !run.processPid && !run.processGroupId && !run.nativeSessionId;
-    if (partiallyDeliveredQueue && run.runtimeMode !== "native" && !unusedAdmission) return null;
     const legacyUserTurn = run.runtimeMode === "legacy" &&
       action.cause === "legacy_execution_requires_reconciliation" &&
       isConversationAdapter(agent.adapterType);
-    if ((queuedInterrupt || queuedRequest) && !legacyUserTurn && !unusedAdmission &&
-        !(queuedRequest && run.runtimeMode === "native" &&
-          (run.status !== "cancelled" || authorizedAt > run.finishedAt)) &&
-        !(queuedInterrupt && response?.source.requiresFreshSession && run.runtimeMode === "native")) return null;
     // Saved input is a request for a new turn, never permission to undo an
     // operator Stop or redeliver a message already consumed by this run.
     if (queuedRequest && !queuedInterrupt && (run.contextSnapshot?.wakeCommentId === commentId ||
@@ -205,6 +200,12 @@ export async function admitExplicitNativeContinuation(input: {
       return blocked("workspace_repair_required", "Verify safe workspace staging or repair before continuing. Your message is saved.");
     }
     const cancelledStartup = await isCancelledNativeStartup(db, run, coordinator);
+    if (partiallyDeliveredQueue && run.runtimeMode !== "native" && !unusedAdmission && !cancelledStartup) return null;
+    if ((queuedInterrupt || queuedRequest) && !legacyUserTurn && !unusedAdmission &&
+        !(queuedRequest && run.runtimeMode === "native" &&
+          (run.status !== "cancelled" || authorizedAt > run.finishedAt!)) &&
+        !(queuedRequest && cancelledStartup && authorizedAt > run.finishedAt!) &&
+        !(queuedInterrupt && response?.source.requiresFreshSession && run.runtimeMode === "native")) return null;
     if (queuedRequest && !queuedInterrupt && run.status === "cancelled" && !unusedAdmission &&
         !canContinueCancelledRun(run) && !(cancelledStartup && authorizedAt > run.finishedAt!)) return null;
     if (retry && run.status === "cancelled" && !canContinueCancelledRun(run) && !cancelledStartup)
