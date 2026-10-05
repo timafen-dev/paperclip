@@ -1,6 +1,7 @@
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
+import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
 import { documentService } from "./documents.js";
 import { parseTaskSearch, taskSearchCtes, taskSearchScore } from "./task-search.js";
@@ -6662,22 +6663,22 @@ export function issueService(db: Db) {
   }
 
   async function getIssueByUuid(id: string) {
-    const row = await db
+    const row = await retryIdempotentDatabaseOperation(() => db
       .select({ ...getTableColumns(issues), externalConversationState: externalConversationStateSql() })
       .from(issues)
       .where(eq(issues.id, id))
-      .then((rows) => rows[0] ?? null);
+      .then((rows) => rows[0] ?? null));
     if (!row) return null;
     const [enriched] = await withIssueLabels(db, [row]);
     return enriched;
   }
 
   async function getIssueByIdentifier(identifier: string) {
-    const row = await db
+    const row = await retryIdempotentDatabaseOperation(() => db
       .select({ ...getTableColumns(issues), externalConversationState: externalConversationStateSql() })
       .from(issues)
       .where(eq(issues.identifier, identifier.toUpperCase()))
-      .then((rows) => rows[0] ?? null);
+      .then((rows) => rows[0] ?? null));
     if (!row) return null;
     const [enriched] = await withIssueLabels(db, [row]);
     return enriched;

@@ -1,3 +1,4 @@
+import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { externalObjectService } from "./external-objects.js";
 import { isAiAuthenticationBlocked } from "./ai-auth-failure.js";
 import { CHAT_COMPLETION_WAKE_REASON, prepareChatCompletionTurn, chatCompletionInstruction, isCompletedOnboardingHandoffWake } from "./chat-completion-delivery.js";
@@ -30014,37 +30015,39 @@ export function heartbeatService(
     ) => {
       const safeForLegacyEncoding = await hasUnsafeTextProjectionDatabase();
       const summary = options.summary === true;
-      const query = db
-        .select(
-          summary
-            ? {
-                ...heartbeatRunSummaryListColumns,
-                ...heartbeatRunListContextColumns,
-              }
-            : safeForLegacyEncoding
+      const rows = await retryIdempotentDatabaseOperation(async () => {
+        const query = db
+          .select(
+            summary
               ? {
-                  ...heartbeatRunListColumns,
-                  error: sql<string | null>`NULL`.as("error"),
+                  ...heartbeatRunSummaryListColumns,
                   ...heartbeatRunListContextColumns,
                 }
-              : {
-                  ...heartbeatRunListColumns,
-                  ...heartbeatRunListContextColumns,
-                  ...heartbeatRunListResultColumns,
-                },
-        )
-        .from(heartbeatRuns)
-        .where(
-          agentId
-            ? and(
-                eq(heartbeatRuns.companyId, companyId),
-                eq(heartbeatRuns.agentId, agentId),
-              )
-            : eq(heartbeatRuns.companyId, companyId),
-        )
-        .orderBy(desc(heartbeatRuns.createdAt));
+              : safeForLegacyEncoding
+                ? {
+                    ...heartbeatRunListColumns,
+                    error: sql<string | null>`NULL`.as("error"),
+                    ...heartbeatRunListContextColumns,
+                  }
+                : {
+                    ...heartbeatRunListColumns,
+                    ...heartbeatRunListContextColumns,
+                    ...heartbeatRunListResultColumns,
+                  },
+          )
+          .from(heartbeatRuns)
+          .where(
+            agentId
+              ? and(
+                  eq(heartbeatRuns.companyId, companyId),
+                  eq(heartbeatRuns.agentId, agentId),
+                )
+              : eq(heartbeatRuns.companyId, companyId),
+          )
+          .orderBy(desc(heartbeatRuns.createdAt));
 
-      const rows = limit ? await query.limit(limit) : await query;
+        return limit ? await query.limit(limit) : await query;
+      });
       return rows.map((row) => {
         const {
           contextIssueId,
