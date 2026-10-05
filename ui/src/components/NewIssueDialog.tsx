@@ -17,6 +17,7 @@ import { authApi } from "../api/auth";
 import { assetsApi } from "../api/assets";
 import { buildCompanyUserInlineOptions, buildMarkdownMentionOptions, isAgentTaskTarget } from "../lib/company-members";
 import { queryKeys } from "../lib/queryKeys";
+import { useNavigate } from "../lib/router";
 import { orderReusableExecutionWorkspaces } from "../lib/reusable-execution-workspaces";
 import {
   defaultExecutionWorkspaceModeForProject,
@@ -29,6 +30,7 @@ import { getRecentAssigneeIds, sortAgentsByRecency, trackRecentAssignee } from "
 import { getRecentProjectIds, trackRecentProject } from "../lib/recent-projects";
 import { recordRecentTask } from "../lib/recent-tasks";
 import { buildExecutionPolicy } from "../lib/issue-execution-policy";
+import { createUuid } from "../lib/uuid";
 import { isIssueWorkMode, nextWorkMode, workModeMetaFor, workModeMetaList } from "../lib/work-mode-meta";
 import { useToastActions } from "../context/ToastContext";
 import {
@@ -486,6 +488,7 @@ export function NewIssueDialog() {
   const workModeOptions = useMemo(() => workModeMetaList(), []);
   const statuses = useMemo(() => buildStatusOptions(), []);
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { pushToast } = useToastActions();
   const { enabled: streamlinedUiEnabled } = useStreamlinedUiEnabled();
   const [title, setTitle] = useState("");
@@ -522,6 +525,7 @@ export function NewIssueDialog() {
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const executionWorkspaceDefaultProjectId = useRef<string | null>(null);
   const initializationKeyRef = useRef<string | null>(null);
+  const createRequestRef = useRef<{ fingerprint: string; idempotencyKey: string } | null>(null);
 
   const effectiveCompanyId = dialogCompanyId ?? selectedCompanyId;
   const dialogCompany = companies.find((c) => c.id === effectiveCompanyId) ?? selectedCompany;
@@ -636,8 +640,9 @@ export function NewIssueDialog() {
     mutationFn: async ({
       companyId,
       stagedFiles: pendingStagedFiles,
+      navigateOnCreate,
       ...data
-    }: { companyId: string; stagedFiles: StagedIssueFile[] } & Record<string, unknown>) => {
+    }: { companyId: string; stagedFiles: StagedIssueFile[]; navigateOnCreate?: boolean } & Record<string, unknown>) => {
       const issue = await issuesApi.create(companyId, data);
       const failures: string[] = [];
 
@@ -659,9 +664,9 @@ export function NewIssueDialog() {
         }
       }
 
-      return { issue, companyId, failures };
+      return { issue, companyId, failures, navigateOnCreate };
     },
-    onSuccess: ({ issue, companyId, failures }) => {
+    onSuccess: ({ issue, companyId, failures, navigateOnCreate }) => {
       if (streamlinedUiEnabled) recordRecentTask(issue, currentUserId);
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(companyId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.listMineByMe(companyId) });
@@ -669,21 +674,29 @@ export function NewIssueDialog() {
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.listUnreadTouchedByMe(companyId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(companyId) });
       if (draftTimer.current) clearTimeout(draftTimer.current);
+      const prefix = (companies.find((company) => company.id === companyId)?.issuePrefix ?? "").trim();
+      const issueRef = issue.identifier ?? issue.id;
+      const openIssueAction = prefix
+        ? { label: `Open ${issueRef}`, href: `/${prefix}/issues/${issueRef}` }
+        : undefined;
       if (failures.length > 0) {
-        const prefix = (companies.find((company) => company.id === companyId)?.issuePrefix ?? "").trim();
-        const issueRef = issue.identifier ?? issue.id;
         pushToast({
           title: `Created ${issueRef} with upload warnings`,
           body: `${failures.length} staged ${failures.length === 1 ? "file" : "files"} could not be added.`,
           tone: "warn",
-          action: prefix
-            ? { label: `Open ${issueRef}`, href: `/${prefix}/issues/${issueRef}` }
-            : undefined,
+          action: openIssueAction,
+        });
+      } else {
+        pushToast({
+          title: `Created ${issueRef}`,
+          tone: "success",
+          action: openIssueAction,
         });
       }
       clearDraft();
       reset();
       closeNewIssue();
+      if (navigateOnCreate) navigate(openIssueAction?.href ?? `/issues/${issueRef}`);
     },
   });
 
@@ -976,6 +989,7 @@ export function NewIssueDialog() {
   }, []);
 
   function reset() {
+    createRequestRef.current = null;
     setIssueText("", "");
     setStatus("todo");
     setPriority("");
@@ -1072,7 +1086,7 @@ export function NewIssueDialog() {
       reviewerValues: reviewerValue ? [reviewerValue] : [],
       approverValues: approverValue ? [approverValue] : [],
     });
-    createIssue.mutate({
+    const createData = {
       companyId: effectiveCompanyId,
       stagedFiles,
       ...(currentTitle ? { title: currentTitle } : {}),
@@ -1097,6 +1111,18 @@ export function NewIssueDialog() {
       ...(watchdogAgentId
         ? { watchdog: { agentId: watchdogAgentId, instructions: watchdogInstructions.trim() || null } }
         : {}),
+    };
+    // An explicit board create is a new task even when its title already exists.
+    // Reuse the request key only for retries of the same submitted draft.
+    const fingerprint = JSON.stringify(createData);
+    if (createRequestRef.current?.fingerprint !== fingerprint) {
+      createRequestRef.current = { fingerprint, idempotencyKey: createUuid() };
+    }
+    createIssue.mutate({
+      ...createData,
+      allowDuplicate: true,
+      idempotencyKey: createRequestRef.current.idempotencyKey,
+      navigateOnCreate: newIssueDefaults.navigateOnCreate === true,
     });
   }
 
