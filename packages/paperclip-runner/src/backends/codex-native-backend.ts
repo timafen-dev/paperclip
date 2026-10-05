@@ -140,7 +140,6 @@ function createTransportBackedNativeSessionBackend(
         ]
       : []),
     ...nativeTaskConstraints(input),
-    "Return one semantic completion result.",
   ];
 
   return new HarnessDriverBackend(

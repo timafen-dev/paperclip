@@ -136,7 +136,7 @@ export async function setupLiveFixtures(input: {
       return api.post<CompanyRecord>("/api/companies", {
         name: `Runner E2E ${execution.id} ${input.executionNonce}`,
         description: "Ephemeral paid full-stack runner acceptance fixture",
-        budgetMonthlyCents: execution.suite.id === "native-completion" ? NATIVE_COMPLETION_BUDGET_CENTS
+        budgetMonthlyCents: ["native-completion", "native-instruction-consolidation"].includes(execution.suite.id) ? NATIVE_COMPLETION_BUDGET_CENTS
           : execution.suite.id === "task-titles" ? TASK_TITLE_BUDGET_CENTS
           : execution.suite.id === "stock-harness" ? 1_000 : 0,
       });
