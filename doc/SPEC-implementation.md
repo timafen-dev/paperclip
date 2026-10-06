@@ -1987,3 +1987,12 @@ and honor current ownership, review, governance, pause, dependency, budget, and
 cleanup gates. Restart or duplicate finalization must not create another
 successor. Permanent model/auth incompatibility and usage-limit exhaustion retain
 their existing operator recovery requirements.
+
+## Internal agent commentary
+
+`agent_commentary` stores company-scoped, attributed complaints and suggestions
+as free-form text in the instance database. Legacy agents use the default
+`complain` and `suggestion-box` runtime skills; native runs use dedicated tools
+in standard, ask, and planning modes. Submission never changes task disposition
+or routes feedback externally. See [Agent commentary](agent-commentary.md) for
+authentication, replay, document-sized limits, inspection, and deletion semantics.

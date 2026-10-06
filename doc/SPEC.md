@@ -722,3 +722,12 @@ A virtual AI connection can rotate new task/agent allocations through an
 authorized pool while preserving session affinity. Admission, credentials and
 durable recovery remain host responsibilities; policy can be supplied by an
 opt-in plugin. See [the experimental contract](connections/AI-CONNECTION-ROUTERS.md).
+
+## Internal agent commentary
+
+`agent_commentary` stores company-scoped, attributed complaints and suggestions
+as free-form text in the instance database. Legacy agents use the default
+`complain` and `suggestion-box` runtime skills; native runs use dedicated tools
+in standard, ask, and planning modes. Submission never changes task disposition
+or routes feedback externally. See [Agent commentary](agent-commentary.md) for
+authentication, replay, document-sized limits, inspection, and deletion semantics.
