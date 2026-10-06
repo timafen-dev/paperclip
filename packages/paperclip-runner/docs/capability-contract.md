@@ -68,10 +68,10 @@ The skill/reference inventory and eval cases are the only normative behavior sou
 | skill:skills/paperclip/SKILL.md:comment-style-required:607 | always_agent_tool | skills/paperclip/SKILL.md:607 |
 | skill:skills/paperclip/SKILL.md:update:639 | optional_agent_tool | skills/paperclip/SKILL.md:639 |
 | skill:skills/paperclip/SKILL.md:planning-required-when-planning-requested:649 | optional_agent_tool | skills/paperclip/SKILL.md:649 |
-| skill:skills/paperclip/SKILL.md:key-endpoints-hot-routes:682 | optional_agent_tool | skills/paperclip/SKILL.md:682 |
-| skill:skills/paperclip/SKILL.md:searching-issues:711 | optional_agent_tool | skills/paperclip/SKILL.md:711 |
-| skill:skills/paperclip/SKILL.md:full-reference:721 | optional_agent_tool | skills/paperclip/SKILL.md:721 |
-| skill:skills/paperclip/SKILL.md:conversational-confirmation-answers:725 | always_agent_tool | skills/paperclip/SKILL.md:725 |
+| skill:skills/paperclip/SKILL.md:key-endpoints-hot-routes:680 | optional_agent_tool | skills/paperclip/SKILL.md:680 |
+| skill:skills/paperclip/SKILL.md:searching-issues:709 | optional_agent_tool | skills/paperclip/SKILL.md:709 |
+| skill:skills/paperclip/SKILL.md:full-reference:719 | optional_agent_tool | skills/paperclip/SKILL.md:719 |
+| skill:skills/paperclip/SKILL.md:conversational-confirmation-answers:723 | always_agent_tool | skills/paperclip/SKILL.md:723 |
 | skill:skills/paperclip/references/api-reference.md:paperclip-api-reference:1 | optional_agent_tool | skills/paperclip/references/api-reference.md:1 |
 | skill:skills/paperclip/references/api-reference.md:response-schemas:9 | optional_agent_tool | skills/paperclip/references/api-reference.md:9 |
 | skill:skills/paperclip/references/api-reference.md:agent-record-get-api-agents-me-or-get-api-agents-agentid:11 | optional_agent_tool | skills/paperclip/references/api-reference.md:11 |

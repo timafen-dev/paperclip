@@ -245,36 +245,36 @@
       "expectedMockState": "operation_result"
     },
     {
-      "id": "skill:skills/paperclip/SKILL.md:682",
+      "id": "skill:skills/paperclip/SKILL.md:680",
       "kind": "skill_heading",
-      "sourceAnchor": "skills/paperclip/SKILL.md#L682:key-endpoints-hot-routes",
+      "sourceAnchor": "skills/paperclip/SKILL.md#L680:key-endpoints-hot-routes",
       "heading": "Key Endpoints (Hot Routes)",
       "primaryDisposition": "control_plane_owned",
       "semanticOperation": "runtime_reconciliation",
       "expectedMockState": "runtime_decision_record"
     },
     {
-      "id": "skill:skills/paperclip/SKILL.md:711",
+      "id": "skill:skills/paperclip/SKILL.md:709",
       "kind": "skill_heading",
-      "sourceAnchor": "skills/paperclip/SKILL.md#L711:searching-issues",
+      "sourceAnchor": "skills/paperclip/SKILL.md#L709:searching-issues",
       "heading": "Searching Issues",
       "primaryDisposition": "control_plane_owned",
       "semanticOperation": "runtime_reconciliation",
       "expectedMockState": "runtime_decision_record"
     },
     {
-      "id": "skill:skills/paperclip/SKILL.md:721",
+      "id": "skill:skills/paperclip/SKILL.md:719",
       "kind": "skill_heading",
-      "sourceAnchor": "skills/paperclip/SKILL.md#L721:full-reference",
+      "sourceAnchor": "skills/paperclip/SKILL.md#L719:full-reference",
       "heading": "Full Reference",
       "primaryDisposition": "control_plane_owned",
       "semanticOperation": "runtime_reconciliation",
       "expectedMockState": "runtime_decision_record"
     },
     {
-      "id": "skill:skills/paperclip/SKILL.md:725",
+      "id": "skill:skills/paperclip/SKILL.md:723",
       "kind": "skill_heading",
-      "sourceAnchor": "skills/paperclip/SKILL.md#L725:conversational-confirmation-answers",
+      "sourceAnchor": "skills/paperclip/SKILL.md#L723:conversational-confirmation-answers",
       "heading": "Conversational confirmation answers",
       "primaryDisposition": "always_agent_tool",
       "semanticOperation": "call_api",
