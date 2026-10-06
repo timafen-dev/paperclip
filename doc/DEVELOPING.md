@@ -460,6 +460,11 @@ npx paperclipai allowed-hostname dotta-macbook-pro
 
 ## Test Commands
 
+The [feature map](../feature-map/README.md) is an optional reference for user
+entry points, targeted tests, manual verification recipes, and coverage gaps.
+Its page inventory is a source snapshot. The documented journeys have separate
+verification steps and do not run automatically from the map.
+
 Use the cheap local default unless you are specifically working on browser flows:
 
 ```sh
