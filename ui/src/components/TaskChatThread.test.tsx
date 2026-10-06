@@ -437,7 +437,15 @@ describe.each(["legacy", "native"] as const)("%s task history readiness", (runti
     async (status) => {
       const props = {
         issueId: "issue-1",
-        comments: createLongThreadComments(),
+        comments: [...createLongThreadComments(), {
+          ...createLongThreadComments()[3],
+          id: "agent-answer",
+          authorType: "agent" as const,
+          authorAgentId: "agent-1",
+          body: "Final saved reply",
+          runId: "started-run",
+          createdAt: new Date("2026-08-25T18:00:02.000Z"),
+        }],
         onAdd: async () => {},
         linkedRuns: [
           retryRun,
@@ -455,9 +463,17 @@ describe.each(["legacy", "native"] as const)("%s task history readiness", (runti
         container.querySelector('[data-testid="task-chat-history-loading"]'),
       ).not.toBeNull();
       expect(container.textContent).toContain("Thread message 1");
-
+      expect(container.querySelector('[data-thread-anchor="comment-1"]')?.closest('[inert]')).not.toBeNull();
       transcriptState.hydratedRunIds = new Set(["started-run"]);
       nativeTranscriptState.hydratedRunIds = new Set(["started-run"]);
+      transcriptState.transcriptByRun.set("started-run", [{
+        kind: "thinking", text: "Reasoning before the reply",
+        ts: "2026-08-25T18:00:01.000Z",
+      }]);
+      nativeTranscriptState.transcriptByRun.set("started-run", [{
+        kind: "assistant", text: "Reasoning before the reply", channel: "progress",
+        ts: "2026-08-25T18:00:01.000Z",
+      }]);
       render(<TaskChatThread {...props} />);
       await act(async () => {
         await new Promise((resolve) => requestAnimationFrame(resolve));
@@ -467,6 +483,15 @@ describe.each(["legacy", "native"] as const)("%s task history readiness", (runti
       expect(
         container.querySelector('[data-testid="task-chat-history-loading"]'),
       ).toBeNull();
+      expect(container.querySelector('[data-thread-anchor="comment-1"]')?.closest('[inert]')).toBeNull();
+      expect(container.textContent).toContain("Thread message 1");
+      if (status === "succeeded" && runtimeMode === "native") {
+        expect(container.textContent).toContain("Reasoning before the reply");
+        expect(container.textContent).toContain("Final saved reply");
+        expect(container.textContent!.indexOf("Reasoning before the reply")).toBeLessThan(
+          container.textContent!.indexOf("Final saved reply"),
+        );
+      }
     },
   );
 });
