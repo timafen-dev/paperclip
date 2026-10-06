@@ -2952,6 +2952,69 @@ export function agentRoutes(
     );
   }
 
+  function assertNoAgentProcessAdapterMutation(req: Request, adapterType: string, mutatesConfiguration: boolean) {
+    if (req.actor.type !== "agent" || adapterType !== "process" || !mutatesConfiguration) return;
+    throw forbidden("Agent keys cannot configure host-executed process adapters.");
+  }
+
+  const LOCAL_ADAPTER_HOST_COMMAND_KEYS = [
+    "command",
+    "hermesCommand",
+    "args",
+    "extraArgs",
+    "cwd",
+    "env",
+    "filesystemSandboxCommand",
+  ] as const;
+
+  const LOCAL_ADAPTER_CREDENTIAL_ENV_KEYS: Record<string, readonly string[]> = {
+    ...INHERITABLE_AGENT_CREDENTIAL_ENV_KEYS,
+    gemini_local: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    kimi_local: ["KIMI_MODEL_API_KEY"],
+    opencode_local: ["PAPERCLIP_OPENCODE_PROVIDERS", "OPENCODE_AUTH_JSON"],
+  };
+  const POOL_AUTH_OVERRIDE_ENV_KEYS = [
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "PAPERCLIP_OPENCODE_PROVIDERS", "OPENCODE_AUTH_JSON",
+  ] as const;
+
+  async function callerUsesAiConnectionPool(req: Request, companyId: string): Promise<boolean> {
+    if (req.actor.type !== "agent" || !req.actor.agentId) return false;
+    const caller = await svc.getById(req.actor.agentId);
+    if (!caller || caller.companyId !== companyId) return false;
+    return asRecord(asRecord(caller.runtimeConfig)?.aiConnection)?.mode === "router";
+  }
+
+  function containsOnlyLocalAdapterCredentialRefs(
+    adapterType: string,
+    env: unknown,
+    allowPlainCredentials: boolean,
+  ): boolean {
+    const envRecord = asRecord(env);
+    if (!envRecord) return false;
+    const allowedKeys = LOCAL_ADAPTER_CREDENTIAL_ENV_KEYS[adapterType] ?? [];
+    return Object.entries(envRecord).every(([key, value]) =>
+      (allowedKeys.includes(key) && isInheritableCredentialReference(value)) ||
+      (allowPlainCredentials && POOL_AUTH_OVERRIDE_ENV_KEYS.includes(key as typeof POOL_AUTH_OVERRIDE_ENV_KEYS[number]) && asEnvBindingString(value) !== null),
+    );
+  }
+
+  function assertNoAgentLocalAdapterHostCommandMutation(
+    req: Request,
+    adapterType: string,
+    adapterConfig: Record<string, unknown>,
+    allowPlainCredentials = false,
+  ) {
+    if (req.actor.type !== "agent" || !adapterType.endsWith("_local")) return;
+    const changedKeys = LOCAL_ADAPTER_HOST_COMMAND_KEYS.filter((key) =>
+      adapterConfig[key] !== undefined &&
+      (key !== "env" || !containsOnlyLocalAdapterCredentialRefs(adapterType, adapterConfig.env, allowPlainCredentials)),
+    );
+    if (changedKeys.length === 0) return;
+    throw forbidden(
+      `Agent keys cannot configure host-executed local adapter settings (${changedKeys.join(", ")}).`,
+    );
+  }
+
   function summarizeAgentUpdateDetails(patch: Record<string, unknown>) {
     const changedTopLevelKeys = Object.keys(patch).sort();
     const details: Record<string, unknown> = { changedTopLevelKeys };
@@ -4457,6 +4520,13 @@ export function agentRoutes(
       await assertSelectableAdapterType(rollbackAdapterType);
     }
     const rollbackAdapterConfig = asRecord(rollbackConfig.adapterConfig) ?? {};
+    assertNoAgentAdapterConfigMutation(req, rollbackAdapterConfig);
+    assertNoAgentLocalAdapterHostCommandMutation(req, rollbackAdapterType, rollbackAdapterConfig);
+    assertNoAgentProcessAdapterMutation(
+      req,
+      rollbackAdapterType,
+      true,
+    );
     assertExternalInstructionsAdmin(req, existing);
     assertExternalInstructionsAdmin(req, {
       ...existing,
@@ -4619,6 +4689,8 @@ export function agentRoutes(
       rawHireAdapterConfig,
     );
     assertNoAgentAdapterConfigMutation(req, rawHireAdapterConfig);
+    assertNoAgentLocalAdapterHostCommandMutation(req, hireInput.adapterType, rawHireAdapterConfig, await callerUsesAiConnectionPool(req, companyId));
+    assertNoAgentProcessAdapterMutation(req, hireInput.adapterType, Object.keys(rawHireAdapterConfig).length > 0);
     const hiredAgentId = randomUUID();
     const authInheritance = await applyHiringAgentAuthInheritance(
       req,
@@ -4928,6 +5000,8 @@ export function agentRoutes(
       rawCreateAdapterConfig,
     );
     assertNoAgentAdapterConfigMutation(req, rawCreateAdapterConfig);
+    assertNoAgentLocalAdapterHostCommandMutation(req, createInput.adapterType, rawCreateAdapterConfig, await callerUsesAiConnectionPool(req, companyId));
+    assertNoAgentProcessAdapterMutation(req, createInput.adapterType, Object.keys(rawCreateAdapterConfig).length > 0);
     const agentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -5566,6 +5640,7 @@ export function agentRoutes(
     const touchesAdapterConfiguration =
       hasOwn(patchData, "adapterType") ||
       hasOwn(patchData, "adapterConfig");
+    assertNoAgentProcessAdapterMutation(req, requestedAdapterType, touchesAdapterConfiguration);
     if (touchesAdapterConfiguration) {
       assertExternalInstructionsAdmin(req, existing);
       const existingAdapterConfig = asRecord(existing.adapterConfig) ?? {};
@@ -5633,6 +5708,13 @@ export function agentRoutes(
       }
       if (requestedAdapterType === "paperclip_runner") {
         rawEffectiveAdapterConfig = normalizePaperclipRunnerAdapterConfig(requestedAdapterType, rawEffectiveAdapterConfig);
+      }
+      if (changingAdapterType || requestedAdapterConfig) {
+        assertNoAgentLocalAdapterHostCommandMutation(
+          req,
+          requestedAdapterType,
+          changingAdapterType ? rawEffectiveAdapterConfig : (requestedAdapterConfig ?? {}),
+        );
       }
       const existingRunnerProvider =
         existing.adapterType === "paperclip_runner"
