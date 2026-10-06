@@ -5172,6 +5172,7 @@ describeEmbeddedPostgres("tool access service", () => {
         "github",
         "github-code-review-bot",
         "youcom",
+        "enterpret",
         "openrouter",
         "bedrock",
         "responses-api",
@@ -5180,7 +5181,7 @@ describeEmbeddedPostgres("tool access service", () => {
         "local",
       ]),
     );
-    expect(res.body.apps).toHaveLength(65);
+    expect(res.body.apps).toHaveLength(66);
     for (const slug of ["openrouter", "bedrock", "responses-api", "messages-api", "chat-completions-api", "local"]) {
       expect(res.body.apps.find((app: { slug: string }) => app.slug === slug).tags).toContain("model-provider");
     }
@@ -5226,6 +5227,120 @@ describeEmbeddedPostgres("tool access service", () => {
           methods: expect.arrayContaining([
             expect.objectContaining({ key: "local", transport: "local_stdio" }),
           ]),
+        }),
+      ]),
+    );
+  });
+
+  it("quarantines newly discovered Enterpret tools on later refreshes", async () => {
+    const company = await createCompany(db);
+    const service = createTestToolAccessService(db);
+    const fetchMock = mockToolsList([
+      { name: "get_organization_details", annotations: { readOnlyHint: true } },
+    ]);
+
+    const result = await service.connectGalleryApp(
+      company.id,
+      {
+        galleryKey: "enterpret",
+        connectionMethodKey: "mcp-api-key",
+        credentialValues: { "credentials.authorization": "qa-secret" },
+      },
+      { actorType: "user", actorId: "board" },
+    );
+
+    expect(result.connection.config).toMatchObject({
+      sourceTemplateKey: "enterpret",
+      quarantineNewEntries: true,
+    });
+    expect(JSON.stringify(result.connection.config)).not.toContain("qa-secret");
+    await service.finishGalleryAppConnection(company.id, result.connectionId, {
+      enabledCatalogEntryIds: result.catalog.map((entry) => entry.id),
+      askFirstCatalogEntryIds: [],
+      access: "all_agents",
+    });
+    fetchMock.mockResolvedValueOnce(
+      mcpHttpResponse({
+        jsonrpc: "2.0",
+        id: "paperclip-catalog-refresh",
+        result: {
+          tools: [
+            { name: "get_organization_details", annotations: { readOnlyHint: true } },
+            { name: "new_enterpret_tool", annotations: { readOnlyHint: true } },
+          ],
+        },
+      }),
+    );
+    const refreshed = await service.refreshCatalog(result.connectionId, {
+      actorType: "user",
+      actorId: "board",
+    });
+    expect(refreshed.catalog).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ toolName: "get_organization_details", status: "active" }),
+        expect.objectContaining({
+          toolName: "new_enterpret_tool",
+          status: "quarantined",
+          quarantineReason: "pending_review",
+        }),
+      ]),
+    );
+
+    const reconnectFetchMock = mockToolsList([
+      { name: "get_organization_details", annotations: { readOnlyHint: true } },
+      { name: "new_enterpret_tool", annotations: { readOnlyHint: true } },
+      { name: "reconnect_discovered_tool", annotations: { readOnlyHint: true } },
+    ]);
+    const reconnected = await service.connectGalleryApp(
+      company.id,
+      {
+        galleryKey: "enterpret",
+        connectionMethodKey: "mcp-api-key",
+        reconnectConnectionId: result.connectionId,
+        credentialValues: { "credentials.authorization": "replacement-secret" },
+      },
+      { actorType: "user", actorId: "board" },
+    );
+    expect(reconnected.connectionId).toBe(result.connectionId);
+    expect(reconnected.catalog).toEqual(expect.arrayContaining([
+      expect.objectContaining({ toolName: "get_organization_details", status: "active" }),
+      expect.objectContaining({ toolName: "new_enterpret_tool", status: "quarantined" }),
+      expect.objectContaining({ toolName: "reconnect_discovered_tool", status: "quarantined" }),
+    ]));
+
+    expect(reconnected.connection.config).toMatchObject({ quarantineNewEntries: true });
+    expect(JSON.stringify(reconnected.connection.config)).not.toContain("replacement-secret");
+    await service.finishGalleryAppConnection(company.id, reconnected.connectionId, {
+      enabledCatalogEntryIds: reconnected.catalog
+        .filter((entry) => entry.toolName === "get_organization_details")
+        .map((entry) => entry.id),
+      askFirstCatalogEntryIds: [],
+      access: "all_agents",
+    });
+
+    reconnectFetchMock.mockResolvedValueOnce(
+      mcpHttpResponse({
+        jsonrpc: "2.0",
+        id: "paperclip-catalog-refresh",
+        result: {
+          tools: [
+            { name: "get_organization_details", annotations: { readOnlyHint: true } },
+            { name: "new_enterpret_tool", annotations: { readOnlyHint: true } },
+            { name: "another_enterpret_tool", annotations: { readOnlyHint: true } },
+          ],
+        },
+      }),
+    );
+    const afterReplacement = await service.refreshCatalog(result.connectionId, {
+      actorType: "user",
+      actorId: "board",
+    });
+    expect(afterReplacement.catalog).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolName: "another_enterpret_tool",
+          status: "quarantined",
+          quarantineReason: "pending_review",
         }),
       ]),
     );
@@ -15716,6 +15831,7 @@ describeEmbeddedPostgres("tool access service", () => {
           {
             galleryKey: "github",
             name: "GitHub rollback",
+            connectionMethodKey: "mcp-key",
             credentialValues: { "credentials.authorization": "github-secret" },
           },
           { actorType: "user", actorId: "board" },
@@ -15833,6 +15949,7 @@ describeEmbeddedPostgres("tool access service", () => {
           {
             galleryKey: "github",
             name: "GitHub reconnect",
+            connectionMethodKey: "mcp-key",
             credentialValues: { "credentials.authorization": "old-secret" },
           },
           { actorType: "user", actorId: "board" },
@@ -16035,6 +16152,7 @@ describeEmbeddedPostgres("tool access service", () => {
           {
             galleryKey: "github",
             name: "Personal GitHub reconnect",
+            connectionMethodKey: "mcp-key",
             grantKind: "user",
             credentialValues: {
               "credentials.authorization": "old-personal-secret",
@@ -16122,6 +16240,7 @@ describeEmbeddedPostgres("tool access service", () => {
             applicationId: connected.application.id,
             galleryKey: "github",
             name: "Personal GitHub reconnect",
+            connectionMethodKey: "mcp-key",
             // No grantKind is sent on reconnect: the retained connection owns that
             // decision and must reactivate this same grant rather than insert a new
             // one or fall back to an organization credential.
@@ -18362,6 +18481,21 @@ describe("classifyRisk", () => {
     for (const name of ["fireflies_share_meeting", "fireflies_revoke_meeting_access", "fireflies_move_meeting", "fireflies_create_soundbite", "fireflies_update_meeting_title"])
       expect(classifyRisk({ name, annotations: { readOnlyHint: true } }, "fireflies")).toBe("write");
     expect(classifyRisk({ name: "fireflies_share_meeting", annotations: { destructiveHint: true } }, "fireflies")).toBe("destructive");
+  });
+
+  it("classifies Enterpret run_graph_query as write despite readOnlyHint", () => {
+    expect(
+      classifyRisk(
+        { name: "run_graph_query", annotations: { readOnlyHint: true } },
+        "enterpret",
+      ),
+    ).toBe("write");
+    expect(
+      classifyRisk(
+        { name: "get_organization_details", annotations: { readOnlyHint: true } },
+        "enterpret",
+      ),
+    ).toBe("read");
   });
 
   const risk = (name: string, annotations?: Record<string, unknown>) =>

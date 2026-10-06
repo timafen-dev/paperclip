@@ -2399,6 +2399,11 @@ export function classifyRisk(
   if (sourceTemplateKey === "fireflies" && [
     "fireflies-share-meeting", "fireflies-revoke-meeting-access", "fireflies-move-meeting",
   ].includes(normalizedToolName)) return "write";
+  // Enterpret's run_graph_query self-reports readOnlyHint: true, but Cypher is
+  // not a read-only language and live validation never established the tool as
+  // safe. Treat it as write so Ask-first defaults can restrict it.
+  if (sourceTemplateKey === "enterpret" && normalizedToolName === "run-graph-query")
+    return "write";
   if (sourceTemplateKey === "posthog" && normalizedToolName === "exec")
     return "destructive";
   if (
@@ -7738,11 +7743,14 @@ export function toolAccessService(
       isGoogleWorkspaceConnectorProfileId(googleProfileValue)
         ? googleProfileValue
         : null;
+    const preserveReviewedCatalog =
+      (isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret") &&
+      existingRows.length > 0;
     const quarantineOnRefresh =
-      (!refreshOptions.enableAllByDefault || (isRailwayEndpoint(connection.config.url) && existingRows.length > 0)) &&
+      (!refreshOptions.enableAllByDefault || preserveReviewedCatalog) &&
       shouldQuarantineNewEntries(connection) &&
       (connection.status === "active" ||
-        (isRailwayEndpoint(connection.config.url) && existingRows.length > 0) ||
+        preserveReviewedCatalog ||
         sourceTemplateKey === "posthog" ||
         refreshOptions.quarantineManagedOAuthDraft === true);
     const safeDefault = asRecord(connection.config).safeDefault === true;
@@ -7838,12 +7846,14 @@ export function toolAccessService(
       }
     }
 
-    const normalizedConfig = isRailwayEndpoint(connection.config.url)
+    const preserveQuarantine =
+      isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret";
+    const normalizedConfig = preserveQuarantine
       ? { ...connection.config, quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
       ? { ...connection.config, quarantineNewEntries: false }
       : connection.config;
-    const normalizedTransportConfig = isRailwayEndpoint(connection.config.url)
+    const normalizedTransportConfig = preserveQuarantine
       ? { ...connection.transportConfig, quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
       ? { ...connection.transportConfig, quarantineNewEntries: false }
@@ -12606,7 +12616,7 @@ export function toolAccessService(
           // Grant-backed setup keeps the full discovered catalog selectable;
           // the wizard projects the app's action defaults into policies at
           // finish time instead of using catalog quarantine as access state.
-          quarantineNewEntries: galleryEntry.slug === "railway",
+          quarantineNewEntries: galleryEntry.slug === "railway" || galleryEntry.slug === "enterpret",
           ...(remoteMcpConnector ? {
             mcpSessionRequired: true,
             mcpAuthMode: input.authMode ?? "auto",
