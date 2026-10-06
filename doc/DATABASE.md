@@ -471,6 +471,10 @@ A partial unique `(company_id, resource_type, resource_id)` index deduplicates
 creation. Each actual agent pause, resume, or termination appends another event,
 including budget actions and generic status updates. The agent row stays locked
 until status and event commit, so concurrent repeat requests emit one hook.
+Project edits and workspace additions, updates, and removals append `update`.
+Repository replacement emits one aggregate update; project creation with repositories
+emits only creation. Project mutations hold the project row lock until their record
+commits. An archive-only change emits nothing and preserves workspace records.
 Termination commits API-key revocation in that same transaction.
 Hire approval and rejection commit with agent activation or termination, so a
 failed event write leaves the decision pending and retryable.
