@@ -1445,7 +1445,7 @@ it("refuses a processing-drain absence claim while local or remote ingress remai
   }
 });
 
-describe.sequential("DurablePrpControlPlane", () => {
+describe("DurablePrpControlPlane", () => {
   it.each(["pending_first", "all_pending", "completed_first"] as const)(
     "retains unanswered semantic input across the bounded event window (%s)",
     async (mode) => {
