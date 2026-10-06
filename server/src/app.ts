@@ -3,6 +3,10 @@ import type { CloudWarmStandby } from "./services/cloud-warm-standby.js";
 import { browserUseRoutes } from "./routes/browser-use.js";
 import { browserUseService } from "./services/browser-use.js";
 import { slackToolRoutes } from "./routes/slack-tools.js";
+import { createPublicMcpOAuth, publicMcpConfig } from "./services/public-mcp/oauth.js";
+import { createMcpApiDispatch, createPublicMcpExecutor } from "./services/public-mcp/capabilities.js";
+import { createPublicMcpEvents, type PublicMcpEvents } from "./services/public-mcp/events.js";
+import { publicMcpIngressRoutes, publicMcpManagementRoutes } from "./routes/public-mcp.js";
 import { agentAvatarRoutes } from "./routes/agent-avatars.js";
 import { aiConnectionRoutes } from "./routes/ai-connections.js";
 import { projectToolRoutes } from "./routes/project-tools.js";
@@ -570,6 +574,11 @@ export async function createApp(
       bindHost: opts.bindHost,
     }),
   );
+  const mcpConfig = publicMcpConfig();
+  const publicMcpOAuth = mcpConfig ? createPublicMcpOAuth(db, mcpConfig) : null;
+  const publicMcpIngress = Router();
+  app.use(publicMcpIngress);
+
   app.use(cloudRuntimeIdentityMiddleware(db));
   // A signed claim above commits identity before any normal request can seed
   // company data. Unclaimed probes bypass session resolution as well as SQL.
@@ -972,6 +981,15 @@ export async function createApp(
       authPublicBaseUrl: opts.authPublicBaseUrl,
     }),
   );
+  let publicMcpEvents: PublicMcpEvents | null = null;
+  if (publicMcpOAuth) {
+    const dispatch = createMcpApiDispatch(api);
+    publicMcpEvents = createPublicMcpEvents(db, publicMcpOAuth, dispatch);
+    publicMcpEvents.start();
+    publicMcpIngress.use(publicMcpIngressRoutes(publicMcpOAuth, createPublicMcpExecutor(db, publicMcpOAuth, dispatch), publicMcpEvents));
+    api.use(publicMcpManagementRoutes(publicMcpOAuth));
+  }
+
   app.use("/api", api);
   app.use("/api", (_req, res) => {
     res.status(404).json({ error: "API route not found" });
@@ -1337,6 +1355,7 @@ export async function createApp(
       // The scheduler tick queries the database. Stop it here, inside the
       // awaited teardown, so no tick runs after the caller ends the pool.
       scheduler.stop();
+      await publicMcpEvents?.stop();
       jobCoordinator.stop();
       disableFeedbackExportFlushes();
       unsubscribeChatPublicationSignals();
