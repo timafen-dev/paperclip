@@ -12,11 +12,21 @@ export interface McpConnectionRequest {
   id: string;
   clientName: string;
   redirectOrigin: string;
+  clientOrigin?: string | null;
   requestedWrite: boolean;
   offlineAccess: boolean;
   requiresSignIn: boolean;
-  companies: Array<{ id: string; name: string; canWrite: boolean }>;
+  /** Fixed by the authorization request; null permits direct-instance selection. */
+  requestedCompanyId: string | null;
+  companies: Array<{ id: string; name: string; logoUrl: string | null; canWrite: boolean }>;
   setupUrl: string | null;
+}
+
+export interface McpConnectionSetup {
+  enabled: boolean;
+  serverUrl: string;
+  invitationUrl: string;
+  invitation: string;
 }
 
 export interface McpConnection {

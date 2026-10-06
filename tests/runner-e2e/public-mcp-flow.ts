@@ -6,6 +6,7 @@ import type { MatrixExecution } from "./types.js";
 import { runAssistant, type AssistantUsage, type AssistantTurn } from "./public-mcp-model.js";
 import { gradeEventFollowUp, gradeDelegation, gradePausedAgent, gradeReportRetrieval, gradeStableMutationIdentity, gradeUntrustedDocument } from "./public-mcp-grading.js";
 import { eventReceiver, mcpEventRpc, connect, mcp, oauthPost, api as browserApi, type Team, type Task, type Run, type Document, type Comment } from "./public-mcp-client.js";
+import { runPublicMcpInvitationFlow } from "./public-mcp-invitation-flow.js";
 
 /** Real first-admin browser bootstrap, no direct fixture DB writes. */
 export async function establishPublicMcpSession(api: RunnerApi, page: Page, secrets: string[]) {
@@ -23,6 +24,7 @@ export async function establishPublicMcpSession(api: RunnerApi, page: Page, secr
   api.setBrowserSession(cookies.join("; "));
   await page.context().addCookies(cookies.map(cookie => ({ name: cookie.slice(0, cookie.indexOf("=")), value: cookie.slice(cookie.indexOf("=") + 1), url: api.baseURL, httpOnly: true, sameSite: "Lax" })));
   await api.post("/api/bootstrap/claim");
+  await api.patch("/api/instance/settings/experimental", { enablePublicMcp: true });
   return user.user.id;
 }
 
@@ -34,6 +36,7 @@ export async function runPublicMcpFlow(input: {
   evidence: (name: string, value: unknown) => Promise<void>;
 }) {
   const { page, api, fixtures, execution, nonce } = input;
+  if (execution.task.id.startsWith("invitation-")) return runPublicMcpInvitationFlow(input);
   const team = fixtures.company as Team;
   const marker = execution.task.buildVisibleMarker(nonce);
   const title = execution.task.buildTitle(nonce);

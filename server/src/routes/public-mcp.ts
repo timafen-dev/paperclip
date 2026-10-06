@@ -5,8 +5,9 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { z } from "zod";
 import { publicMcpEventDefinitions, type PublicMcpEvents } from "../services/public-mcp/events.js";
 import { McpEventError } from "../services/public-mcp/event-webhooks.js";
-import { PUBLIC_MCP_PATH, PUBLIC_MCP_SCOPES, mcpConsentSchema } from "@paperclipai/shared";
-import { McpOAuthError, type PublicMcpOAuth } from "../services/public-mcp/oauth.js";
+import { PUBLIC_MCP_PATH, PUBLIC_MCP_SCOPES, mcpConsentSchema, mcpInvitation, mcpSetupUrl } from "@paperclipai/shared";
+import { renderMcpSetup, mcpSetupMarkdown } from "../services/public-mcp/setup.js";
+import { DEVICE_GRANT, McpOAuthError, type PublicMcpOAuth } from "../services/public-mcp/oauth.js";
 import { McpApiError, McpCapabilityError, publicMcpCapabilities, type createPublicMcpExecutor } from "../services/public-mcp/capabilities.js";
 
 const oauthErrors: ErrorRequestHandler = (error, _req, res, next) => {
@@ -40,25 +41,46 @@ export function publicMcpIngressRoutes(oauth: PublicMcpOAuth, execute: ReturnTyp
   const { origin, resource } = oauth.config;
   const prefix = origin + "/mcp/oauth";
   const resourceMetadata = origin + "/.well-known/oauth-protected-resource" + PUBLIC_MCP_PATH;
+  router.get(["/mcp/setup", "/mcp/setup.md"], async (req, res) => {
+    await oauth.assertEnabled();
+    const company = z.uuid().optional().safeParse(req.query.company);
+    if (!company.success) throw new McpOAuthError("invalid_request", "Invalid organization hint.");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+    res.vary("Accept");
+    if (req.path.endsWith(".md") || req.accepts(["html", "text/markdown"]) === "text/markdown") {
+      res.type("text/markdown").send(mcpSetupMarkdown(resource, company.data));
+    } else res.type("html").send(renderMcpSetup(resource, company.data));
+  });
   router.use(["/mcp/oauth", PUBLIC_MCP_PATH], (_req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Referrer-Policy", "no-referrer");
     next();
   });
+  router.use(["/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server", PUBLIC_MCP_PATH, "/mcp/oauth/register", "/mcp/oauth/authorize", "/mcp/oauth/token"], async (_req, _res, next) => {
+    await oauth.assertEnabled();
+    next();
+  });
   router.get(["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource" + PUBLIC_MCP_PATH], (_req, res) => res.json({
-    resource, authorization_servers: [origin], scopes_supported: PUBLIC_MCP_SCOPES, bearer_methods_supported: ["header"],
-    resource_name: "Paperclip team",
+    resource, authorization_servers: [origin], scopes_supported: ["paperclip:read", "paperclip:write"], bearer_methods_supported: ["header"],
+    resource_name: "Paperclip",
   }));
   router.get("/.well-known/oauth-authorization-server", (_req, res) => res.json({
     issuer: origin, authorization_endpoint: prefix + "/authorize", token_endpoint: prefix + "/token",
     registration_endpoint: prefix + "/register", revocation_endpoint: prefix + "/revoke",
-    response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"],
+    response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token", DEVICE_GRANT],
+    device_authorization_endpoint: prefix + "/device_authorization",
     token_endpoint_auth_methods_supported: ["none"], revocation_endpoint_auth_methods_supported: ["none"],
     code_challenge_methods_supported: ["S256"], scopes_supported: PUBLIC_MCP_SCOPES,
+    authorization_response_iss_parameter_supported: true,
+    client_id_metadata_document_supported: true,
   }));
   router.use("/mcp/oauth", authRateLimit(), express.urlencoded({ extended: false, limit: "16kb" }));
   router.post("/mcp/oauth/register", async (req, res) => res.status(201).json(await oauth.register(req.body, req.ip ?? req.socket.remoteAddress ?? "unknown")));
-  router.get("/mcp/oauth/authorize", async (req, res) => res.redirect(303, await oauth.authorize(req.query)));
+  router.post("/mcp/oauth/device_authorization", async (req, res) => res.json(await oauth.deviceAuthorize(req.body, req.ip ?? req.socket.remoteAddress ?? "unknown")));
+  router.get("/mcp/oauth/authorize", async (req, res) => res.redirect(303, await oauth.authorize(req.query, req.ip ?? req.socket.remoteAddress ?? "unknown")));
   router.post("/mcp/oauth/token", async (req, res) => res.json(await oauth.token(req.body ?? {})));
   router.post("/mcp/oauth/revoke", async (req, res) => {
     if (typeof req.body?.token !== "string" || typeof req.body?.client_id !== "string") throw new McpOAuthError("invalid_request", "A token and client_id are required.");
@@ -70,7 +92,7 @@ export function publicMcpIngressRoutes(oauth: PublicMcpOAuth, execute: ReturnTyp
     let principal;
     try { if (!token) throw new Error(); principal = await oauth.authenticate(token); }
     catch {
-      res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${resourceMetadata}", error="invalid_token"`);
+      res.setHeader("WWW-Authenticate", `Bearer resource_metadata="${resourceMetadata}", scope="paperclip:read paperclip:write", error="invalid_token"`);
       res.status(401).json({ error: "invalid_token" }); return;
     }
     if (req.method !== "POST") { res.setHeader("Allow", "POST"); res.status(405).end(); return; }
@@ -166,6 +188,16 @@ export function publicMcpManagementRoutes(oauth: PublicMcpOAuth) {
     next();
   };
   router.use("/mcp", (_req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
+  router.get("/mcp/device", authRateLimit(), async (req, res) => {
+    const code = z.string().regex(/^[A-Za-z0-9 -]{8,12}$/).safeParse(req.query.user_code);
+    if (!code.success) throw new McpOAuthError("invalid_request", "Enter the code shown by your assistant.");
+    res.json(await oauth.describeDevice(code.data, req.actor));
+  });
+  router.post("/mcp/device/consent", realUser, sameOrigin, authRateLimit(), async (req, res) => {
+    const parsed = mcpConsentSchema.extend({ userCode: z.string().regex(/^[A-Za-z0-9 -]{8,12}$/) }).safeParse(req.body);
+    if (!parsed.success) throw new McpOAuthError("invalid_request", "Enter your code and choose the requested access.");
+    res.json(await oauth.consentDevice(parsed.data.userCode, req.actor, parsed.data));
+  });
   router.get("/mcp/requests/:id", async (req, res) => {
     let setupUrl: string | null = null;
     if (process.env.PAPERCLIP_CLOUD_API_ORIGIN) {
@@ -179,6 +211,10 @@ export function publicMcpManagementRoutes(oauth: PublicMcpOAuth) {
     if (!parsed.success) throw new McpOAuthError("invalid_request", "Choose a company and the requested access.");
     res.json(await oauth.consent(String(req.params.id), req.actor, parsed.data));
   });
+  router.get("/mcp/setup", realUser, async (_req, res) => res.json({
+    enabled: await oauth.isEnabled(), serverUrl: oauth.config.resource,
+    invitationUrl: mcpSetupUrl(oauth.config.resource), invitation: mcpInvitation(oauth.config.resource),
+  }));
   router.get("/mcp/connections", realUser, async (req, res) => res.json(await oauth.listConnections(req.actor.userId!)));
   router.delete("/mcp/connections/:id", realUser, sameOrigin, async (req, res) => {
     if (!z.uuid().safeParse(req.params.id).success) throw new McpOAuthError("invalid_request", "Invalid connection ID.");

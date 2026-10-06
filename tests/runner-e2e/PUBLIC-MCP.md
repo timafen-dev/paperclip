@@ -102,7 +102,39 @@ Hosted provisioning, store installation, desktop chat UI and external-agent task
 claims have separate release gates. Cloud broker and OAuth expiry/revocation/role
 boundaries retain their focused protocol tests; paid success does not replace them.
 
-## Recorded local acceptance
+## Invitation cold starts
+
+Five additional cases expand the explicit catalog to thirteen cases / 39 cells:
+`invitation-cold-start`, `invitation-existing-config`,
+`invitation-unavailable-host`, `invitation-denied`, and `invitation-reconnect`.
+Each begins with zero configured Paperclip tools or credentials. The paid model
+fetches the production public Markdown instructions and operates an evaluation-owned
+MCP host with explicit setup tools. Device authorization, browser consent, token
+redemption and the resulting MCP transport are real. This does not stand in for
+testing installation in OpenCode, Codex, Claude Code or browser connector settings.
+
+The host records configuration changes, preserves unrelated server entries and
+only exposes Paperclip tools after approval. Independent connection-list reads
+check the granted company and absence of grants after refusal or an unsupported
+host. Models must verify their connected identity before delegation. Successful
+cases create one real worker task and retrieve its agent-authored result in a new
+conversation; reconnect additionally closes and reopens the MCP transport using
+the saved authorization, without new consent. Negative cases use one explicitly
+fixture-created worker task to retain worker billing/terminal-state coverage;
+that task is not represented as assistant-authorized work. No assistant mutation
+or Paperclip tool access is permitted in those negative cases.
+
+`public-mcp-invitation.json` records the host boundary and independent grants.
+The public setup source is fingerprinted alongside the existing workflow skills.
+Missing evidence, early tool access, wrong-company grants, replaced configuration,
+repeated installation and mutations before identity verification fail the calibrated
+oracle. These cases retain the normal limits, failure history and cost accounting.
+
+```sh
+pnpm test:e2e:runner -- --suite public-mcp --case invitation-cold-start --profile assistant-codex-mini --max-automatic-retries 0
+```
+
+## Earlier recorded local acceptance
 
 On 2026-10-01, two initial complete runs on identical source passed **42/42 cells**
 without retries. After rebasing and review fixes, a fresh full matrix passed
@@ -141,3 +173,12 @@ wrong results. No private-address exemption is added to production delivery.
 pnpm test:e2e:runner -- --id public-mcp.assistant-codex-mini.local.event-follow-up
 pnpm test:e2e:runner -- --suite public-mcp --case event-follow-up --max-parallel 1
 ```
+
+The invitation cold-start case uses a normal chat handoff: the model must present
+the exact verification link, the fixture human approves in the real browser, and
+a separate user turn resumes the task. Other setup-capable cases also support
+this path when the model presents the link instead of calling the host's approval
+UI tool. Browser decisions are recorded as explicit host events between turns,
+never fabricated as model tool calls. Missing approval or delegation fails early.
+Grader v11 calibrates both handoff mechanisms and rejects early work, missing
+independent grants, refusal bypass, and reordered approval evidence.

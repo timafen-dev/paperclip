@@ -97,6 +97,7 @@ const explicitOpenApiOperationCoverageExclusions = new Set([
   // browser connection-management operations remain documented in the board API.
   "GET /.well-known/oauth-authorization-server",
   "POST /mcp/oauth/register",
+  "POST /mcp/oauth/device_authorization",
   "GET /mcp/oauth/authorize",
   "POST /mcp/oauth/token",
   "POST /mcp/oauth/revoke",
