@@ -2043,6 +2043,21 @@
       "liveProof": "not-run"
     },
     {
+      "app": "telem",
+      "method": "mcp-api-key",
+      "auth": "api_key",
+      "policy": "provider-key",
+      "requestedScopes": [],
+      "capability": "read",
+      "supportedActions": "None: web search and page fetch tools (usage is billed to the Telem account).",
+      "evidence": [
+        "https://docs.telem.ai"
+      ],
+      "reviewedAt": "2026-10-03",
+      "liveProof": "not-run",
+      "keyPermissions": "None: web search and page fetch tools (usage is billed to the Telem account). Any Telem API key works."
+    },
+    {
       "app": "ticket-tailor",
       "method": "mcp-oauth",
       "auth": "oauth",

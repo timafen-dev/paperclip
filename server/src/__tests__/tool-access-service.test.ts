@@ -5181,9 +5181,10 @@ describeEmbeddedPostgres("tool access service", () => {
         "messages-api",
         "chat-completions-api",
         "local",
+        "telem",
       ]),
     );
-    expect(res.body.apps).toHaveLength(67);
+    expect(res.body.apps).toHaveLength(68);
     for (const slug of ["openrouter", "bedrock", "responses-api", "messages-api", "chat-completions-api", "local"]) {
       expect(res.body.apps.find((app: { slug: string }) => app.slug === slug).tags).toContain("model-provider");
     }
@@ -6626,6 +6627,67 @@ describeEmbeddedPostgres("tool access service", () => {
         { actorType: "agent", actorId: "agent-1" },
       ),
     ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("keeps a saved Telem.AI header policy when the connection is reconnected", async () => {
+    const company = await createCompany(db);
+    const service = createTestToolAccessService(db);
+    const actor = { actorType: "user" as const, actorId: "board" };
+    mockToolsList([{ name: "telem_search" }]);
+    const first = await service.connectGalleryApp(
+      company.id,
+      {
+        galleryKey: "telem",
+        connectionMethodKey: "mcp-api-key",
+        credentialValues: { "credentials.authorization": "tlm_first-key" },
+      },
+      actor,
+    );
+    await service.updateConnection(first.connectionId, {
+      status: "active",
+      config: { ...first.connection.config, headerPolicy: { metadata: { forward: [] } } },
+    });
+
+    mockToolsList([{ name: "telem_search" }]);
+    const reconnected = await service.connectGalleryApp(
+      company.id,
+      {
+        galleryKey: "telem",
+        connectionMethodKey: "mcp-api-key",
+        credentialValues: { "credentials.authorization": "tlm_second-key" },
+        reconnectConnectionId: first.connectionId,
+      },
+      actor,
+    );
+
+    expect(reconnected.connectionId).toBe(first.connectionId);
+    expect(reconnected.connection.config.headerPolicy).toEqual({ metadata: { forward: [] } });
+  });
+
+  it("forwards Paperclip context headers by default for a Telem.AI connection", async () => {
+    const company = await createCompany(db);
+    const service = createTestToolAccessService(db);
+    mockToolsList([{ name: "telem_search" }]);
+    const result = await service.connectGalleryApp(
+      company.id,
+      {
+        galleryKey: "telem",
+        connectionMethodKey: "mcp-api-key",
+        credentialValues: { "credentials.authorization": "tlm_test-secret" },
+        configValues: { tier: "extended" },
+      },
+      { actorType: "user", actorId: "board" },
+    );
+    expect(result.connection.config).toMatchObject({
+      sourceTemplateKey: "telem",
+      methodConfig: { tier: "extended" },
+      headerPolicy: {
+        metadata: {
+          forward: ["company_id", "issue_id", "agent_id", "run_id", "project_id", "correlation_id"],
+        },
+      },
+    });
+    expect(JSON.stringify(result.connection.config)).not.toContain("tlm_test-secret");
   });
 
   it("requires an explicit PostHog method and projects optional validated project filters", async () => {
@@ -19434,6 +19496,51 @@ describe("normalizeConnectionMethodConfig", () => {
   const shopifyUcpMethod = shopifyMethods.find(
     (method) => method.key === "ucp-commerce",
   )!;
+
+  it("sends Telem settings as headers and leaves unset settings out", () => {
+    const telemMethod = getConnectableAppDefinition("telem")!.methods[0]!;
+    expect(normalizeConnectionMethodConfig(telemMethod, {})).toEqual({
+      values: {},
+      url: "https://mcp.telem.ai/mcp",
+    });
+    expect(
+      normalizeConnectionMethodConfig(telemMethod, {
+        autoRouting: "accuracy",
+        tier: "extended",
+        providersInclude: "brave, exa\nbrave",
+        providersExclude: "serpapi",
+      }),
+    ).toEqual({
+      values: {
+        autoRouting: "accuracy",
+        tier: "extended",
+        providersInclude: "brave,exa",
+        providersExclude: "serpapi",
+      },
+      url: "https://mcp.telem.ai/mcp",
+      headers: {
+        "X-Telem-Auto-Routing": "accuracy",
+        "X-Telem-Tier": "extended",
+        "X-Telem-Providers-Include": "brave,exa",
+        "X-Telem-Providers-Exclude": "serpapi",
+      },
+    });
+    expect(
+      normalizeConnectionMethodConfig(telemMethod, { autoRouting: "off" }),
+    ).toEqual({
+      values: { autoRouting: "off" },
+      url: "https://mcp.telem.ai/mcp",
+      headers: { "X-Telem-Auto-Routing": "off" },
+    });
+    expect(() =>
+      normalizeConnectionMethodConfig(telemMethod, { tier: "premium" }),
+    ).toThrow("Tier has an invalid option");
+    expect(() =>
+      normalizeConnectionMethodConfig(telemMethod, {
+        providersInclude: "brave; drop",
+      }),
+    ).toThrow("Providers to include has an invalid value");
+  });
 
   it("builds a concrete Shopify endpoint from the validated store domain", () => {
     expect(

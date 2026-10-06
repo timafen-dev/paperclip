@@ -273,7 +273,7 @@ describe("AppDefinition catalog", () => {
         "google-workspace-search",
       ]),
     );
-    expect(SELF_SERVE_MCP_CANDIDATES).toHaveLength(51);
+    expect(SELF_SERVE_MCP_CANDIDATES).toHaveLength(52);
     expect(BLOCKED_MCP_PROVIDERS.map((entry) => entry.slug)).toEqual([
       "g2",
       "vercel",
@@ -437,15 +437,15 @@ describe("AppDefinition catalog", () => {
     expect(channel("slack")?.guidanceMd).toContain("reactions");
     expect(channel("slack")?.guidanceMd).toContain("direct messages");
   });
-  it("keeps a complete, unique, dated evidence ledger for all 54 researched MCP providers", () => {
+  it("keeps a complete, unique, dated evidence ledger for all 55 researched MCP providers", () => {
     // Ledger-wide date reflects the last full re-verification (2026-08-26);
     // later provider additions carry their own research evidence, but
     // bumping the shared date would overstate freshness for the other providers.
     expect(SELF_SERVE_MCP_RESEARCH.verifiedAt).toBe("2026-08-26");
-    expect(SELF_SERVE_MCP_RESEARCH.entries).toHaveLength(54);
+    expect(SELF_SERVE_MCP_RESEARCH.entries).toHaveLength(55);
     expect(
       new Set(SELF_SERVE_MCP_RESEARCH.entries.map((entry) => entry.slug)),
-    ).toHaveProperty("size", 54);
+    ).toHaveProperty("size", 55);
     for (const entry of SELF_SERVE_MCP_RESEARCH.entries) {
       expect(new URL(entry.docsUrl).protocol).toBe("https:");
       expect(new URL(entry.serverUrl).protocol).toBe("https:");
@@ -688,6 +688,34 @@ describe("AppDefinition catalog", () => {
       defaults: { serverUrl: "https://api.you.com/mcp?profile=free" },
     });
     expect(method("youcom", "mcp-free")?.credentialFields).toBeUndefined();
+    expect(
+      APP_DEFINITIONS.find((app) => app.slug === "telem")?.methods.map(
+        (candidate) => candidate.key,
+      ),
+    ).toEqual(["mcp-api-key"]);
+    expect(method("telem")).toMatchObject({
+      auth: "api_key",
+      defaults: { serverUrl: "https://mcp.telem.ai/mcp" },
+      keyPlacement: {
+        location: "header",
+        name: "Authorization",
+        prefix: "Bearer ",
+      },
+      consoleLinks: { keys: "https://app.telem.ai" },
+    });
+    expect(
+      method("telem")?.tenantFields?.map((field) => [
+        field.key,
+        field.required ?? false,
+        field.transport?.location,
+        field.transport?.name,
+      ]),
+    ).toEqual([
+      ["autoRouting", false, "header", "X-Telem-Auto-Routing"],
+      ["tier", false, "header", "X-Telem-Tier"],
+      ["providersInclude", false, "header", "X-Telem-Providers-Include"],
+      ["providersExclude", false, "header", "X-Telem-Providers-Exclude"],
+    ]);
   });
   it("uses discovery-first Notion MCP OAuth metadata", () => {
     const notion = APP_DEFINITIONS.find((app) => app.slug === "notion");
@@ -817,7 +845,7 @@ describe("AppDefinition catalog", () => {
       "ticktick",
       "xero",
     ]);
-    expect(APP_STORE_DEFINITIONS).toHaveLength(67);
+    expect(APP_STORE_DEFINITIONS).toHaveLength(68);
     const connectableSlugs = new Set(
       CONNECTABLE_APP_DEFINITIONS.map((entry) => entry.slug),
     );

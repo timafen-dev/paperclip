@@ -12763,6 +12763,19 @@ export function toolAccessService(
             mcpPreserveAccess: Boolean(retainedConnection && (retainedConnection.status === "active" || asRecord(retainedConnection.config).mcpPreserveAccess === true)),
           } : {}),
           ...(galleryEntry.slug === "posthog" ? { safeDefault: true } : {}),
+          // Telem.AI attributes each search to the Paperclip company, agent,
+          // run and issue, so its catalog connection forwards those context
+          // headers by default (the gateway still drops empty values). A
+          // reconnect keeps the policy the operator saved on the connection.
+          ...(galleryEntry.slug === "telem"
+            ? {
+                headerPolicy: asRecord(retainedConnection?.config).headerPolicy ?? {
+                  metadata: {
+                    forward: ["company_id", "issue_id", "agent_id", "run_id", "project_id", "correlation_id"],
+                  },
+                },
+              }
+            : {}),
         }
       : { ...baseConfig, quarantineNewEntries: false, unverifiedServer: true };
     if (method && isPaperclipCloudConnectorStrategy(method.oauthStrategy)) {
