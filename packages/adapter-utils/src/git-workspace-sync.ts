@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createWorkspaceManifest, workspacePaths, WorkspaceNulParser, type WorkspacePaths } from "./workspace-manifest.js";
 import { runWorkspaceGitProcess } from "./workspace-git-stream.js";
-import { preserveWorkspaceRestoreErrorDiagnostic } from "./workspace-restore-diagnostics.js";
+import { preserveWorkspaceRestoreErrorDiagnostic, withWorkspaceRestoreGitCommand, type WorkspaceRestoreGitCommand } from "./workspace-restore-diagnostics.js";
 
 export interface GitCommandResult {
   stdout: string;
@@ -810,6 +810,14 @@ export function buildRemoteGitDeltaBundleScript(input: {
   ].filter(Boolean).join("\n");
 }
 
+// Labels are fixed at the integration call sites, never derived from Git arguments.
+function runIntegrationGit(
+  command: WorkspaceRestoreGitCommand,
+  ...args: Parameters<typeof runLocalGit>
+): Promise<GitCommandResult> {
+  return withWorkspaceRestoreGitCommand(command, () => runLocalGit(...args));
+}
+
 /**
  * Preserve imported work whose history does not connect to the local one.
  *
@@ -831,11 +839,11 @@ export async function createUnrelatedHistoryGraftCommit(input: {
   importedHead: string;
   syncLabel: string;
 }): Promise<string> {
-  const importedTree = (await runLocalGit(input.localDir, ["rev-parse", `${input.importedHead}^{tree}`], {
+  const importedTree = (await runIntegrationGit("rev_parse", input.localDir, ["rev-parse", `${input.importedHead}^{tree}`], {
     timeout: 10_000,
     maxBuffer: 16 * 1024,
   })).stdout.trim();
-  const importedMessage = (await runLocalGit(input.localDir, ["log", "-1", "--format=%B", input.importedHead], {
+  const importedMessage = (await runIntegrationGit("log", input.localDir, ["log", "-1", "--format=%B", input.importedHead], {
     timeout: 10_000,
     maxBuffer: 256 * 1024,
   })).stdout;
@@ -844,8 +852,8 @@ export async function createUnrelatedHistoryGraftCommit(input: {
     "",
     `(${input.syncLabel} graft ${input.importedHead.slice(0, 12)}: imported history shares no ancestor with ${input.currentHead.slice(0, 12)})`,
   ].join("\n");
-  const graftCommit = await runLocalGit(
-    input.localDir,
+  const graftCommit = await runIntegrationGit(
+    "commit_tree", input.localDir,
     [...GIT_SYNC_COMMIT_IDENTITY_ARGS, "commit-tree", importedTree, "-p", input.currentHead, "-m", message],
     {
       timeout: 60_000,
@@ -865,7 +873,7 @@ async function updateLocalGitHead(input: {
   // Git holds HEAD.lock (and the branch lock when attached) until commit/abort,
   // so a checkout cannot redirect the write after this check. --no-deref also
   // prevents a detached write from following a newly attached branch.
-  await new Promise<void>((resolve, reject) => {
+  await withWorkspaceRestoreGitCommand("update_ref", () => new Promise<void>((resolve, reject) => {
     let identityError: unknown;
     let prepared = false;
     let output = "";
@@ -886,7 +894,7 @@ async function updateLocalGitHead(input: {
       prepared = true;
       void (async () => {
         try {
-          const branchName = (await runLocalGit(input.localDir, ["symbolic-ref", "--quiet", "--short", "HEAD"], {
+          const branchName = (await runIntegrationGit("symbolic_ref", input.localDir, ["symbolic-ref", "--quiet", "--short", "HEAD"], {
             timeout: 10_000,
           }).catch((error) => {
             if (error.code === 1) return { stdout: "" };
@@ -909,7 +917,7 @@ async function updateLocalGitHead(input: {
       "prepare",
       "",
     ].join("\n"));
-  });
+  }));
 }
 
 export async function integrateImportedGitHead(input: {
@@ -925,8 +933,8 @@ export async function integrateImportedGitHead(input: {
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const snapshot = {
-      headCommit: (await runLocalGit(input.localDir, ["rev-parse", "HEAD"])).stdout.trim(),
-      branchName: (await runLocalGit(input.localDir, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch((error) => {
+      headCommit: (await runIntegrationGit("rev_parse", input.localDir, ["rev-parse", "HEAD"])).stdout.trim(),
+      branchName: (await runIntegrationGit("symbolic_ref", input.localDir, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch((error) => {
         if (error.code === 1) return { stdout: "" };
         throw error;
       })).stdout.trim() || null,
@@ -943,7 +951,7 @@ export async function integrateImportedGitHead(input: {
     // (timeout, missing object, repository error) must keep failing the
     // integration instead of silently rewriting the tip.
     let noCommonAncestor = false;
-    const mergeBase = await runLocalGit(input.localDir, ["merge-base", currentHead, input.importedHead], {
+    const mergeBase = await runIntegrationGit("merge_base", input.localDir, ["merge-base", currentHead, input.importedHead], {
       timeout: 10_000,
       maxBuffer: 16 * 1024,
     }).catch((error: unknown) => {
@@ -999,7 +1007,7 @@ export async function integrateImportedGitHead(input: {
 
     let mergedTree;
     try {
-      mergedTree = await runLocalGit(input.localDir, ["merge-tree", "--write-tree", currentHead, input.importedHead], {
+      mergedTree = await runIntegrationGit("merge_tree", input.localDir, ["merge-tree", "--write-tree", currentHead, input.importedHead], {
         timeout: 60_000,
         maxBuffer: 256 * 1024,
       });
@@ -1014,8 +1022,8 @@ export async function integrateImportedGitHead(input: {
       throw new Error("Failed to compute a merged git tree for workspace restore.");
     }
 
-    const mergeCommit = await runLocalGit(
-      input.localDir,
+    const mergeCommit = await runIntegrationGit(
+      "commit_tree", input.localDir,
       [
         ...GIT_SYNC_COMMIT_IDENTITY_ARGS,
         "commit-tree",

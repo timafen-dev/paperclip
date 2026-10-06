@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { workspacePaths } from "./workspace-manifest.js";
 import { runWorkspaceGitProcess } from "./workspace-git-stream.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { getWorkspaceRestoreDiagnostic, withWorkspaceRestoreDiagnostics, withWorkspaceRestoreStep } from "./workspace-restore-diagnostics.js";
+import { getWorkspaceRestoreDiagnostic, withWorkspaceRestoreDiagnostics, withWorkspaceRestoreStep, withWorkspaceRestoreGitCommand } from "./workspace-restore-diagnostics.js";
 
 import {
   buildRemoteGitDeltaBundleScript,
@@ -893,8 +893,91 @@ exit 0
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toMatch(/Failed to merge concurrent remote git histories/);
     expect(error).not.toHaveProperty("cause");
-    expect(getWorkspaceRestoreDiagnostic(error)).toEqual({ phase: "workspace", step: "git_integration", errorCode: "unknown", exitCode: expectedExit });
+    expect(getWorkspaceRestoreDiagnostic(error)).toEqual({ phase: "workspace", step: "git_integration", errorCode: "unknown", exitCode: expectedExit,
+      gitCommand: "merge_tree", gitFailureKind: "invalid_object" });
     expect(await git(repo, ["rev-parse", "HEAD"])).toBe(currentHead);
+  });
+
+  it("identifies a real merge conflict without changing the host tip or copying Git output", async () => {
+    const repo = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-conflict-diagnostic-"));
+    cleanupDirs.push(repo);
+    await git(repo, ["init", "-b", "host"]);
+    await git(repo, ["config", "user.name", "Test"]);
+    await git(repo, ["config", "user.email", "test@paperclip.dev"]);
+    await writeFile(path.join(repo, "private-filename.txt"), "base\n");
+    await git(repo, ["add", "."]);
+    await git(repo, ["commit", "-m", "base"]);
+    const base = await git(repo, ["rev-parse", "HEAD"]);
+    await writeFile(path.join(repo, "private-filename.txt"), "host change\n");
+    await git(repo, ["commit", "-am", "host"]);
+    const currentHead = await git(repo, ["rev-parse", "HEAD"]);
+    await git(repo, ["checkout", "-b", "imported", base]);
+    await writeFile(path.join(repo, "private-filename.txt"), "remote change\n");
+    await git(repo, ["commit", "-am", "remote"]);
+    const importedHead = await git(repo, ["rev-parse", "HEAD"]);
+    await git(repo, ["checkout", "host"]);
+    const logs: string[] = [];
+    const error = await withWorkspaceRestoreDiagnostics("workspace", () => withWorkspaceRestoreStep("directory_merge", () =>
+      withWorkspaceRestoreStep("git_integration", () => integrateImportedGitHead({ localDir: repo, importedHead }))),
+    async (line) => { logs.push(line); }).catch(error => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain("Failed to merge concurrent remote git histories");
+    expect(error).not.toHaveProperty("cause");
+    expect(getWorkspaceRestoreDiagnostic(error)).toEqual({ phase: "workspace", step: "git_integration", errorCode: "unknown",
+      exitCode: 1, gitCommand: "merge_tree", gitFailureKind: "merge_conflict" });
+    expect(await git(repo, ["rev-parse", "HEAD"])).toBe(currentHead);
+    expect(await readFile(path.join(repo, "private-filename.txt"), "utf8")).toBe("host change\n");
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).not.toMatch(/private-filename|host change|remote change/);
+    for (const privateValue of [repo, currentHead, importedHead]) expect(logs[0]).not.toContain(privateValue);
+  });
+
+  it("labels a failed locked ref transaction without changing its branch or tip", async () => {
+    const repo = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-transaction-diagnostic-"));
+    cleanupDirs.push(repo);
+    await git(repo, ["init", "-b", "private-branch"]);
+    await git(repo, ["config", "user.name", "Test"]);
+    await git(repo, ["config", "user.email", "test@paperclip.dev"]);
+    await git(repo, ["commit", "--allow-empty", "-m", "base"]);
+    const base = await git(repo, ["rev-parse", "HEAD"]);
+    await git(repo, ["commit", "--allow-empty", "-m", "advance"]);
+    const importedHead = await git(repo, ["rev-parse", "HEAD"]);
+    await git(repo, ["reset", "--hard", base]);
+    // Git owns this lock. A failed restore must leave it alone and keep its
+    // existing failure behavior; diagnostic collection grants no cleanup rights.
+    await writeFile(path.join(repo, ".git", "HEAD.lock"), "private-lock");
+    const error = await withWorkspaceRestoreDiagnostics("workspace", () => withWorkspaceRestoreStep("git_integration", () =>
+      integrateImportedGitHead({ localDir: repo, importedHead, baseline: { headCommit: base, branchName: "private-branch" } })))
+      .catch(error => error);
+    expect(error).toMatchObject({ code: 128 });
+    const diagnostic = getWorkspaceRestoreDiagnostic(error);
+    expect(diagnostic).toEqual({ phase: "workspace", step: "git_integration", errorCode: "unknown", exitCode: 128,
+      gitCommand: "update_ref", gitFailureKind: "unknown" });
+    expect(await git(repo, ["rev-parse", "HEAD"])).toBe(base);
+    expect(await git(repo, ["symbolic-ref", "--short", "HEAD"])).toBe("private-branch");
+    expect(await readFile(path.join(repo, ".git", "HEAD.lock"), "utf8")).toBe("private-lock");
+    for (const privateValue of [repo, base, importedHead, "private-branch"]) expect(JSON.stringify(diagnostic)).not.toContain(privateValue);
+  });
+
+  it("recognizes a real expected-old ref mismatch without copying the ref or commit IDs", async () => {
+    const repo = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-ref-diagnostic-"));
+    cleanupDirs.push(repo);
+    await git(repo, ["init", "-b", "private-branch"]);
+    await git(repo, ["config", "user.name", "Test"]);
+    await git(repo, ["config", "user.email", "test@paperclip.dev"]);
+    await git(repo, ["commit", "--allow-empty", "-m", "base"]);
+    const base = await git(repo, ["rev-parse", "HEAD"]);
+    await git(repo, ["commit", "--allow-empty", "-m", "advance"]);
+    const current = await git(repo, ["rev-parse", "HEAD"]);
+    const error = await withWorkspaceRestoreDiagnostics("workspace", () => withWorkspaceRestoreStep("git_integration", () =>
+      withWorkspaceRestoreGitCommand("update_ref", () => runLocalGit(repo, ["update-ref", "refs/heads/private-branch", base, base]))))
+      .catch(error => error);
+    expect(error).toMatchObject({ code: 128 });
+    const diagnostic = getWorkspaceRestoreDiagnostic(error);
+    expect(diagnostic).toEqual({ phase: "workspace", step: "git_integration", errorCode: "unknown", exitCode: 128,
+      gitCommand: "update_ref", gitFailureKind: "ref_conflict" });
+    expect(await git(repo, ["rev-parse", "HEAD"])).toBe(current);
+    for (const privateValue of [repo, base, current, "private-branch"]) expect(JSON.stringify(diagnostic)).not.toContain(privateValue);
   });
 
   it("preserves the real Git index reset exit code without attaching its raw error", async () => {
