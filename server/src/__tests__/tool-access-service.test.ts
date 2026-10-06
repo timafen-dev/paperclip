@@ -5172,9 +5172,18 @@ describeEmbeddedPostgres("tool access service", () => {
         "github",
         "github-code-review-bot",
         "youcom",
+        "openrouter",
+        "bedrock",
+        "responses-api",
+        "messages-api",
+        "chat-completions-api",
+        "local",
       ]),
     );
-    expect(res.body.apps).toHaveLength(59);
+    expect(res.body.apps).toHaveLength(65);
+    for (const slug of ["openrouter", "bedrock", "responses-api", "messages-api", "chat-completions-api", "local"]) {
+      expect(res.body.apps.find((app: { slug: string }) => app.slug === slug).tags).toContain("model-provider");
+    }
     expect(
       res.body.apps.find((app: { slug: string }) => app.slug === "gmail")
         .ownershipAvailability,

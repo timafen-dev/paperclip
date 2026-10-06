@@ -30,6 +30,7 @@ vi.mock("@/api/email", () => ({ emailApi: {
 } }));
 
 const credentialRender = vi.hoisted(() => vi.fn());
+const routedCredentialRender = vi.hoisted(() => vi.fn());
 const setupOptionsMock = vi.hoisted(() => vi.fn());
 const completeMock = vi.hoisted(() => vi.fn());
 const declineMock = vi.hoisted(() => vi.fn());
@@ -66,6 +67,16 @@ vi.mock("@/components/ai-connections/AiConnectionCredentialStep", () => ({
     <button onClick={() => props.onComplete({ connectionId: props.connectionId ?? "new-ai-account", grantId: "grant", method: "api_key" })}>Reconnect selected account</button>
     <button onClick={props.onCancel}>Cancel repair</button>
   </div>; },
+}));
+
+vi.mock("@/components/ai-connections/AiProviderSetup", () => ({
+  AiProviderSetup: (props: { reconnect: { id: string }; onComplete: (binding: { connectionId: string; grantId: string; method: "api_key" }) => void; onCancel: () => void }) => {
+    routedCredentialRender(props);
+    return <div data-testid="routed-ai-repair">
+      <button onClick={() => props.onComplete({ connectionId: props.reconnect.id, grantId: "grant", method: "api_key" })}>Reconnect routed account</button>
+      <button onClick={props.onCancel}>Cancel routed repair</button>
+    </div>;
+  },
 }));
 
 vi.mock("./ConnectionSetupFlow", () => ({
@@ -477,6 +488,21 @@ describe("ConnectionIntentInteractionBody dialog behavior", () => {
 describe("AI repair inside the card", () => {
   const interaction: ConnectionIntentInteraction = { ...pendingConnectionIntentInteraction, payload: { ...pendingConnectionIntentInteraction.payload, purpose: "ai" } };
   const connection = { id: "selected-account", name: "My Codex account", provider: "openai", method: "api_key", ownership: "personal", ownerName: "Dotta", status: "revoked" };
+  it.each(["openrouter", "bedrock", "gateway"] as const)("retains the selected %s route through task-card account repair", async kind => {
+    const routing = kind === "bedrock"
+      ? { kind, protocol: "bedrock", region: "us-east-1", auth: "bearer", models: [] }
+      : { kind, protocol: "responses", auth: "bearer", models: [], ...(kind === "gateway" ? { baseUrl: "https://gateway.example/v1" } : {}) };
+    const routedConnection = { ...connection, provider: kind === "bedrock" ? "anthropic" : kind === "openrouter" ? "openrouter" : "openai", routing };
+    setupOptionsMock.mockResolvedValue({ interaction, existingConnections: [], aiRepair: { connection: routedConnection, canReconnect: true } });
+    completeMock.mockResolvedValue({ ...interaction, status: "accepted" });
+    renderBody(interaction); await flush();
+    await act(() => button("Fix connection")!.click());
+    expect(document.querySelector('[data-testid="shared-ai-credentials"]')).toBeNull();
+    expect(routedCredentialRender.mock.lastCall![0]).toMatchObject({ companyId: interaction.companyId, agentId: interaction.payload.requestingAgentId, reconnect: routedConnection });
+    await act(() => button("Reconnect routed account")!.click());
+    expect(completeMock).toHaveBeenCalledWith(interaction.id, connection.id);
+  });
+
   it.each([false, true])("requires atomic validated legacy adoption (validation fails: %s)", async (fails) => {
     const binding = { provider: "openai", method: "subscription", mode: "responsible_user" };
     setupOptionsMock.mockResolvedValue({ interaction, existingConnections: [], aiConnection: binding, aiConnectionRequiresAdoption: true });

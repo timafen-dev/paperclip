@@ -1,5 +1,6 @@
 import { syncConnectionCredentialBindings } from "./connection-credential-bindings.js";
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { and, eq, inArray, or } from "drizzle-orm";
 import {
   type Db,
@@ -19,6 +20,8 @@ import {
 } from "@paperclipai/db";
 import {
   AI_CONNECTION_CAPABILITIES,
+  aiConnectionCatalogSlug,
+  getAppStoreDefinition,
   aiConnectionMetadataSchema,
   aiSubscriptionNeedsIsolatedLogin,
   isAiConnectionCompatible,
@@ -194,9 +197,8 @@ export function aiConnectionService(db: Db) {
         throw unprocessable(
           "Reconnect this account before making it your default",
         );
-      const metadata = aiConnectionMetadataSchema.parse(
-        row.connection.config.ai,
-      );
+      const metadata = aiConnectionMetadataSchema.parse(row.connection.config.ai);
+      if (metadata.routing) throw unprocessable("Custom providers use an explicit connection selection on the agent.");
       // Keep old servers' method preferences intact during an additive rollout.
       await tx.insert(aiConnectionDefaults)
         .values({ companyId, userId, ...metadata, grantId })
@@ -401,6 +403,8 @@ export function aiConnectionService(db: Db) {
     };
   }
   async function credential(row: Pick<Awaited<ReturnType<typeof select>>, "connection" | "grant">) {
+    const metadata = aiConnectionMetadataSchema.parse(row.connection.config.ai);
+    if (metadata.routing?.auth === "none") return "";
     const ref = row.grant.credentialSecretRefs.find(
       (r) => r.configPath === "ai.credential",
     );
@@ -464,6 +468,7 @@ export function aiConnectionService(db: Db) {
     sessionId?: string,
     attemptStartedAt = new Date(),
   ) {
+    const routing = "routing" in input ? input.routing : undefined;
     if (!(await membership(companyId, userId)))
       throw forbidden("An active company member must own this connection");
     const reconnect = input.connectionId
@@ -486,6 +491,8 @@ export function aiConnectionService(db: Db) {
         input.provider
     )
       throw unprocessable("Reconnect cannot change providers");
+    if (reconnect && !isDeepStrictEqual((reconnect.connection.config.ai as AiConnectionMetadata).routing, routing))
+      throw unprocessable("Reconnect must retain this connection’s routing. Create another connection to change its destination.");
     if (
       reconnect &&
       ((reconnect.connection.config.ai as AiConnectionMetadata).method !==
@@ -570,7 +577,8 @@ export function aiConnectionService(db: Db) {
           : source?.name === `ai-${grantId}`;
         if (!privateSlot) secretId = undefined;
       }
-      if (secretId)
+      if (!verifiedCredential) { secretId = undefined; }
+      else if (secretId)
         await secrets.rotate(
           secretId,
           { value: verifiedCredential },
@@ -618,15 +626,17 @@ export function aiConnectionService(db: Db) {
         if (targets.length !== new Set(input.agentIds).size)
           throw forbidden("Agent does not belong to this company");
       }
-      const key = `app-gallery:${input.provider}`;
+      const source = aiConnectionCatalogSlug(input.provider, routing);
+      const providerName = getAppStoreDefinition(source)?.name ?? AI_CONNECTION_CAPABILITIES[input.provider].name;
+      const key = `app-gallery:${source}`;
       await tx
         .insert(toolApplications)
         .values({
           companyId,
           applicationKey: key,
-          name: AI_CONNECTION_CAPABILITIES[input.provider].name,
+          name: providerName,
           type: "mcp_http",
-          metadata: { sourceTemplateKey: input.provider },
+          metadata: { sourceTemplateKey: source },
           ownerUserId: userId,
         })
         .onConflictDoNothing();
@@ -640,7 +650,7 @@ export function aiConnectionService(db: Db) {
               eq(toolApplications.applicationKey, key),
               eq(
                 toolApplications.name,
-                AI_CONNECTION_CAPABILITIES[input.provider].name,
+                providerName,
               ),
             ),
           ),
@@ -676,8 +686,8 @@ export function aiConnectionService(db: Db) {
             enabled: true,
             healthStatus: "ok",
             config: {
-              sourceTemplateKey: input.provider,
-              ai: { provider: input.provider, method: input.method },
+              sourceTemplateKey: source,
+              ai: { provider: input.provider, method: input.method, ...(routing ? { routing } : {}) },
               aiIsolatedSubscription: input.method === "subscription" && input.provider !== "anthropic",
             },
             createdByUserId: userId,
@@ -704,14 +714,14 @@ export function aiConnectionService(db: Db) {
           /* Safe account identity is optional. */
         }
       }
-      const refs = [
+      const refs = secretId ? [
         {
           secretId: secretId!,
           configPath: "ai.credential",
           required: true,
           versionSelector: "latest" as const,
         },
-      ];
+      ] : [];
       if (reconnect)
         await tx
           .update(connectionGrants)
@@ -742,7 +752,7 @@ export function aiConnectionService(db: Db) {
         .from(toolConnections)
         .where(eq(toolConnections.id, id));
       await syncConnectionCredentialBindings(tx, savedConnection, refs);
-      if (input.ownership === "personal") {
+      if (input.ownership === "personal" && !routing) {
         await tx
           .insert(aiConnectionDefaults)
           .values({

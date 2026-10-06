@@ -233,6 +233,15 @@ describe("AppDefinition catalog", () => {
 
   it("validates all Wave 1 definitions", () =>
     expect(() => appDefinitionsSchema.parse(APP_DEFINITIONS)).not.toThrow());
+  it("lists model providers as regular tagged catalog entries", () => {
+    const slugs = ["openai", "anthropic", "openrouter", "xai", "google", "bedrock", "responses-api", "messages-api", "chat-completions-api", "local"];
+    expect(APP_STORE_DEFINITIONS.filter(app => app.tags?.includes("model-provider")).map(app => app.slug).sort()).toEqual(slugs.sort());
+    for (const slug of slugs) {
+      const app = APP_STORE_DEFINITIONS.find(app => app.slug === slug)!;
+      expect(app.methods.some(method => method.purpose === "ai" && method.transport === "runtime_auth")).toBe(true);
+    }
+  });
+
   it("contains every established provider plus the reviewed self-serve catalog", () => {
     expect(APP_DEFINITIONS.map((app) => app.slug)).toEqual(
       expect.arrayContaining([
@@ -729,7 +738,7 @@ describe("AppDefinition catalog", () => {
       "ticktick",
       "xero",
     ]);
-    expect(APP_STORE_DEFINITIONS).toHaveLength(59);
+    expect(APP_STORE_DEFINITIONS).toHaveLength(65);
     const connectableSlugs = new Set(
       CONNECTABLE_APP_DEFINITIONS.map((entry) => entry.slug),
     );

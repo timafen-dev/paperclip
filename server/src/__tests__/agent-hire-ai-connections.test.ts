@@ -118,7 +118,9 @@ describe("agent-created hires use managed AI connections", () => {
     await db.update(agents).set({ runtimeConfig: { aiConnection: p.binding } }).where(eq(agents.id, f.agentId));
     const response = await request(f.app).post(`/api/companies/${f.companyId}/agent-hires`).send({ name: "Incompatible teammate", role: "engineer", adapterType: "claude_local" });
     expect(response.status, JSON.stringify(response.body)).toBe(422);
-    expect(response.body.error).toContain("no compatible harness");
+    // Fixed bindings contain identity only; compatibility is decided from
+    // authoritative connection metadata when selecting each pool member.
+    expect(response.body.details?.code).toBe("ai_connection_pool_no_eligible_member");
     expect(await db.select().from(agents).where(eq(agents.companyId, f.companyId))).toHaveLength(1);
   });
 

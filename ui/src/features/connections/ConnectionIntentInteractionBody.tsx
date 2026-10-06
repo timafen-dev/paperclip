@@ -14,6 +14,7 @@ import { connectionIntentsApi } from "@/api/connection-intents";
 import { aiConnectionsApi } from "@/api/ai-connections";
 import { agentsApi } from "@/api/agents";
 import { AiConnectionCredentialStep } from "@/components/ai-connections/AiConnectionCredentialStep";
+import { AiProviderSetup } from "@/components/ai-connections/AiProviderSetup";
 import { defaultAiConnectionName } from "@/components/ai-connections/model";
 import { AppLogo } from "@/pages/apps/AppLogo";
 import { AgentAvatar } from "@/components/AgentAvatar";
@@ -393,7 +394,13 @@ export function ConnectionIntentInteractionBody({
           {completeMutation.isPending ? "Continuing…" : "Continue task"}
         </Button>
       </div>
-    : repair ? repair.canReconnect ? <AiConnectionCredentialStep
+    : repair ? repair.canReconnect ? repair.connection.routing ? <AiProviderSetup
+        companyId={interaction.companyId}
+        agentId={interaction.payload.requestingAgentId}
+        reconnect={repair.connection}
+        onComplete={(binding) => selectAiAccountMutation.mutate({ connectionId: binding.connectionId, grantId: binding.grantId, method: binding.method ?? "api_key", generation })}
+        onCancel={() => { closeSetup(); returnFocusToCard(); }}
+      /> : <AiConnectionCredentialStep
         companyId={interaction.companyId}
         provider={repair.connection.provider}
         initialMethod={repair.connection.method}

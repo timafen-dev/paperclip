@@ -1718,13 +1718,36 @@ const inferState = (slug, state) => {
   };
 };
 // Runtime credentials share the provider catalog, but never expose tool actions.
-for (const [slug, name, subscription, envKey] of [["anthropic", "Claude", true, "ANTHROPIC_API_KEY"], ["openai", "OpenAI", true, "OPENAI_API_KEY"], ["openrouter", "OpenRouter", false, "OPENROUTER_API_KEY"], ["xai", "Grok", true, "XAI_API_KEY"]]) {
- let app=apps.find(a=>a.slug===slug);
- if(!app){app={schemaVersion:1,slug,name,description:`Connect ${name} accounts for your agents.`,categories:["ai"],branding:brandingFor(slug),urlPatterns:[{"openai":"https://api.openai.com/*","openrouter":"https://openrouter.ai/api/*","xai":"https://api.x.ai/*"}[slug]],methods:[]};apps.push(app);}
- const methods=(subscription?["subscription","api_key"]:["api_key"]).map(authMethod=>({key:`ai-${authMethod}`,label:authMethod==="subscription"?`${name} subscription`:`${name} API key`,purpose:"ai",transport:"runtime_auth",auth:authMethod==="subscription"?"oauth":"api_key",ai:{provider:slug,method:authMethod},grantKinds:["user","organization"],ownershipModes:["customer"],whenToUse:"Authenticate an agent with this account.",guidanceMd:"Use your personal account or an explicitly shared company account.",riskTier:"S3",...(authMethod==="api_key"?{credentialFields:[field("apiKey","API key","Enter API key")],keyPlacement:{location:"env",name:envKey}}:{})}));
- // Legacy REST entries have no tool execution adapter. Only offer the supported
- // AI account flow; saved REST connections remain removable through Connections.
- app.methods = [...methods, ...app.methods.filter(method => method.transport !== "rest_api")];
+const aiCatalogEntries = [
+  { slug: "anthropic", name: "Claude", provider: "anthropic", subscription: true, envKey: "ANTHROPIC_API_KEY" },
+  { slug: "openai", name: "OpenAI", provider: "openai", subscription: true, envKey: "OPENAI_API_KEY", url: "https://api.openai.com/*" },
+  { slug: "openrouter", name: "OpenRouter", provider: "openrouter", envKey: "OPENROUTER_API_KEY", url: "https://openrouter.ai/api/*" },
+  { slug: "xai", name: "Grok", provider: "xai", subscription: true, envKey: "XAI_API_KEY", url: "https://api.x.ai/*" },
+  { slug: "google", name: "Google Gemini", provider: "google", envKey: "GEMINI_API_KEY", url: "https://generativelanguage.googleapis.com/*" },
+  { slug: "bedrock", name: "Amazon Bedrock", provider: "anthropic", envKey: "AWS_BEARER_TOKEN_BEDROCK", description: "Use Claude through Amazon Bedrock with a Bedrock API key and AWS region." },
+  { slug: "responses-api", name: "Responses API", provider: "openai", envKey: "OPENAI_API_KEY", description: "Connect any compatible harness to an OpenAI Responses-compatible provider or gateway, including Emissary." },
+  { slug: "messages-api", name: "Messages API", provider: "anthropic", envKey: "ANTHROPIC_API_KEY", description: "Connect any compatible harness to an Anthropic Messages-compatible provider or gateway." },
+  { slug: "chat-completions-api", name: "Chat Completions API", provider: "openai", envKey: "OPENAI_API_KEY", description: "Connect any compatible harness to a Chat Completions-compatible provider or gateway." },
+  { slug: "local", name: "Local endpoint", provider: "openai", envKey: "OPENAI_API_KEY", description: "Use a local model server in the agent’s execution environment." },
+];
+for (const { slug, name, provider, subscription, envKey, url, description } of aiCatalogEntries) {
+  let app = apps.find(a => a.slug === slug);
+  if (!app) {
+    app = { schemaVersion: 1, slug, name, description: description ?? `Connect ${name} accounts for your agents.`, categories: ["ai"], branding: brandingFor(slug), urlPatterns: url ? [url] : [], methods: [] };
+    apps.push(app);
+  }
+  app.tags = [...new Set([...(app.tags ?? []), "model-provider"])];
+  const methods = (subscription ? ["subscription", "api_key"] : ["api_key"]).map(authMethod => ({
+    key: `ai-${authMethod}`, label: authMethod === "subscription" ? `${name} subscription` : `${name} API key`,
+    purpose: "ai", transport: "runtime_auth", auth: authMethod === "subscription" ? "oauth" : "api_key",
+    ai: { provider, method: authMethod }, grantKinds: ["user", "organization"], ownershipModes: ["customer"],
+    whenToUse: description ?? "Authenticate an agent with this account.",
+    guidanceMd: "Use your personal account or an explicitly shared company account.", riskTier: "S3",
+    ...(authMethod === "api_key" ? { credentialFields: [field("apiKey", "API key", "Enter API key")], keyPlacement: { location: "env", name: envKey } } : {}),
+  }));
+  // Legacy REST entries have no tool execution adapter. Only offer the supported
+  // AI account flow; saved REST connections remain removable through Connections.
+  app.methods = [...methods, ...app.methods.filter(method => method.transport !== "rest_api")];
 }
 // Every tool method has a checked-in permission review. Discovery metadata is
 // evidence for reviewers, never a runtime instruction to request more scopes.
