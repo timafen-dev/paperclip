@@ -22,6 +22,46 @@ scheduled execution gets
 a fresh Paperclip home, embedded Postgres database, instance configuration,
 port, workspace, company, encrypted secrets, environment, and agent.
 
+## Native connection guidance (explicit only)
+
+The manual-only native-connection-guidance suite separates connection-policy
+discovery from fixture instructions. It reuses five Everyday journeys on local
+native Codex, ACPX Claude and OpenCode: service approval/decline, new Notion
+setup decline, external-provider decline and choosing the second provider.
+Fifteen cells are configured, not live-qualified by their existence. Select an
+exact execution ID or this suite; --all and generic profile selectors exclude it.
+
+The three decline prompts define a brief explanation as the permitted fallback.
+They do not mention the future decline, name connection tools, prescribe a
+provider, or tell the model not to retry. The approval and second-provider
+prompts remain identical to the original stories. The historical
+everyday-workflows cases and their original grades remain unchanged.
+
+Each cell allows one attempt, expects two provider turns, retains a twelve-run
+maximum and twelve-minute deadline, and verifies 1,000-cent company and agent
+hard stops through public records before task creation. All actual runs,
+usage/cost gaps, controller retries and cleanup must remain in the report.
+No real third-party mutation occurs. The external-provider decline includes
+the same deterministic installed Arcade gateway as the positive control, so its
+zero-call assertion has an actual counter rather than a missing-fixture default.
+
+The new decline oracle requires the saved decision, exactly one interaction,
+unchanged connection identities, and an explanation after the decision from a
+successful run of the same agent on the same native task. The public comment createdByRunId field
+owns attribution; names, ordering or counts cannot substitute. Service/provider
+declines require observed zero fixture calls. Notion setup ends before
+credentials or a service invocation; it does not qualify real Notion access.
+The original lifecycle, native identity, approval and document checks still run.
+These fallback tasks expect Done; they do not qualify blocking when essential
+work remains, arbitrary setup success, independent work while waiting,
+explicit retry after decline, or general integration quality.
+
+Use the existing report publisher and retained artifact boundary. The suite
+definition digest includes its prompts, flow, graders, fixture setup and browser
+submission code. Compare frozen sources under identical fixture/model/budget
+controls before using it to qualify a production instruction change. See
+[the connection audit](../../doc/plans/2026-10-06-native-connection-guidance.md).
+
 ## Native procedure guidance comparison (explicit only)
 
 Select `--suite everyday-workflows --environment local --case hire-reuse --case delegate-feedback

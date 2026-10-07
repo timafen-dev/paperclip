@@ -19,6 +19,7 @@ import { lifecycleLiveTasks, lifecycleLiveDefinitionDigest } from "./lifecycle-l
 import { publicMcpTasks, publicMcpExpandedDigest, publicMcpSetupDigest, publicMcpWorkflowDigest, publicMcpWorkerInstructions, publicMcpWorkerSkillDigest } from "./public-mcp-cases.js";
 import { graderVersion as publicMcpGraderVersion } from "./public-mcp-grading.js";
 import { everydayTasks, productionStoryProfile } from "./everyday-cases.js";
+import { CONNECTION_GUIDANCE_SUITE, CONNECTION_GUIDANCE_BUDGET_CENTS, connectionGuidanceTasks, connectionGuidanceDefinitionDigest } from "./connection-guidance-cases.js";
 
 import { firstTaskTasks } from "./first-task-cases.js";
 import { chatTasks, chatHardeningTasks, chatStoryTasks, chatQualificationTasks, chatCompletionTasks } from "./chat-cases.js";
@@ -1272,6 +1273,18 @@ export const runnerSuites: readonly RunnerSuiteFixture[] = [
       ...["legacy-codex", "legacy-claude", "runner-codex"].map(profile => `continuation.${profile}.local.provider-question-bridge`),
     ],
     definitionMetadata: { version: 4, grading: "durable-state-and-approval-boundaries", instructions: "production" },
+  },
+  {
+    id: CONNECTION_GUIDANCE_SUITE, label: "Native connection guidance", manualOnly: true,
+    description: "Neutral decline prompts and approval/provider-choice controls; production connection instructions stay unchanged.",
+    groups: ["native", "local"],
+    profiles: runnerProfiles.filter(profile => ["runner-codex", "runner-acpx-claude", "runner-opencode"].includes(profile.id)).map(productionStoryProfile),
+    environments: [localEnvironment], tasks: connectionGuidanceTasks, expectedMatrixSize: 15,
+    definitionMetadata: { version: 1, fixtureDigest: connectionGuidanceDefinitionDigest(),
+      instructions: "unchanged-production", maximumAttemptsPerCell: 1,
+      automaticRetryPolicy: "single_attempt", companyAndAgentBudgetCents: CONNECTION_GUIDANCE_BUDGET_CENTS,
+      expectedProviderTurnsPerCell: 2, maximumRunRecordsPerCell: 12,
+      grading: "original-workflow-plus-attributed-decline-output", scheduling: "explicit-only" },
   },
   {
     id: "everyday-workflows", label: "Everyday Paperclip Work", manualOnly: true,
