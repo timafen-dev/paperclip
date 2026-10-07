@@ -7,6 +7,7 @@ import { prepareConnectionInstructionDelivery } from "./connection-instructions.
 import { resolveAssignedConnectionInstructionsForRun } from "./native-runtime/assigned-mcp-tools.js";
 import { externalObjectService } from "./external-objects.js";
 import { isAiAuthenticationBlocked } from "./ai-auth-failure.js";
+import { nativeRetryCancellationCommitCondition, rethrowNativeCancellationLockConflict, claimCancellationRequest, startupCancellationFence } from "./native-runtime/native-cancellation-request.js";
 import { CHAT_COMPLETION_WAKE_REASON, prepareChatCompletionTurn, chatCompletionInstruction, isCompletedOnboardingHandoffWake } from "./chat-completion-delivery.js";
 import { AgentDirectoryReuseInvalidatedError, isAgentDirectoryCopy } from "./agent-directory-working-copies.js";
 
@@ -9464,10 +9465,11 @@ export async function cancelHeartbeatNativeRun(input: {
   runId: string;
   reason: string;
   runtimeMode: string | null;
+  cancellationRequestId?: string;
   cancel?: (
     runId: string,
     reason: string,
-    options: { db: Db; scope: "run" },
+    options: { db: Db; scope: "run"; cancellationRequestId?: string },
   ) => Promise<{ decision: unknown | null; auditId: string | null }>;
 }) {
   if (input.runtimeMode !== "native") {
@@ -9477,10 +9479,12 @@ export async function cancelHeartbeatNativeRun(input: {
     ? await input.cancel(input.runId, input.reason, {
         db: input.db,
         scope: "run",
+        ...(input.cancellationRequestId ? { cancellationRequestId: input.cancellationRequestId } : {}),
       })
     : await cancelNativeSession(input.runId, input.reason, {
         db: input.db,
         scope: "run",
+        ...(input.cancellationRequestId ? { cancellationRequestId: input.cancellationRequestId } : {}),
       });
   if (!cancellation.decision || !cancellation.auditId) {
     throw new Error("native_cancellation_outcome_not_audited");
@@ -13024,6 +13028,7 @@ export function heartbeatService(
     fromStatuses: string[],
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
     failureReport?: RunFailureReportOptions,
+    cancellationCondition?: ReturnType<typeof nativeRetryCancellationCommitCondition>,
   ) {
     // fromStatuses can name a terminal status as its own source (for example,
     // an idempotent "still failed" patch), so the write below is not always a
@@ -13082,13 +13087,18 @@ export function heartbeatService(
               and(
                 eq(heartbeatRuns.id, runId),
                 inArray(heartbeatRuns.status, fromStatuses),
+                ...(cancellationCondition ? [cancellationCondition] : []),
                 ...(isHeartbeatRunTerminalStatus(status)
                   ? [nativeRunnerOwnershipNotHeldCondition()]
                   : []),
               ),
             )
             .returning()
-            .then((rows) => rows[0] ?? null);
+            .then((rows) => rows[0] ?? null)
+            .catch((error: unknown) => {
+              if (cancellationCondition) rethrowNativeCancellationLockConflict(error);
+              throw error;
+            });
 
     if (updated) {
       publishLiveEvent({
@@ -23705,7 +23715,8 @@ export function heartbeatService(
             const savedFileInput = parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput);
             const priorFileInput = Object.keys(savedFileInput).length ? savedFileInput : parseObject(parseObject(priorFileRun?.profile).nativeExecutionInput);
             const priorWorkingCopy = parseObject(parseObject(parseObject(priorFileInput.runtimeContext).instructions).workingCopy);
-            const warmFiles = nativeRuntimeResolution.kind === "native" && nativeRuntimeResolution.profile.backend === "codex_app_server" &&
+            const warmFiles = nativeRuntimeResolution.kind === "native" && (nativeRuntimeResolution.profile.backend === "codex_app_server" ||
+              (nativeRuntimeResolution.profile.backend === "acpx_runtime" && parseObject(agent.adapterConfig).acpxAgent === "cursor")) &&
               (executionTarget?.kind === "remote" && executionTarget.transport === "sandbox"
                 ? executionTarget.runnerLifecyclePolicy?.mode === "warm"
                 : parseObject(agent.adapterConfig).lifecycleMode === "warm");
@@ -25259,6 +25270,11 @@ export function heartbeatService(
             await completeWorkspace();
           }
         } catch (adapterErr) {
+          if (adapterErr instanceof NativeCancellationPendingRecoveryError) {
+            // Durable cancellation is settled by the outer recovery handler;
+            // it does not imply a failed workspace or a persisted run result.
+            throw adapterErr;
+          }
           if (adapterErr instanceof NativeWorkspaceFinalizationBusyError
             || adapterErr instanceof NativeWorkspaceFinalizationOwnershipLostError) {
             nativeWorkspaceFinalizeScheduled = true;
@@ -29625,6 +29641,9 @@ export function heartbeatService(
   }
 
   type CancelRunOptions = {
+    /** Optional board request identity, atomically reserved for native Stop. */
+    cancellationRequestId?: string;
+    cancellationRequestedByUserId?: string | null;
     errorCode?: string;
     resultJson?: Record<string, unknown>;
     eventMessage?: string;
@@ -29653,20 +29672,27 @@ export function heartbeatService(
   ) {
     let run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
+    if (options.cancellationRequestId) {
+      run = await claimCancellationRequest(db, runId, run.companyId, options.cancellationRequestId, options.cancellationRequestedByUserId ?? null);
+    }
+    // The caller claim checked retry eligibility under both durable row locks.
+    // This is only a cancellation candidate: dispatch rechecks the coordinator
+    // under lock, and the final CAS requires its own unchanged acknowledged
+    // retry fence. Re-reading only retryable_failure here would strand replay.
     const pendingNativeRetry =
-      run.runtimeMode === "native" && run.status === "failed"
-        ? await db
-            .select({ runId: nativeRunFinalizations.runId })
-            .from(nativeRunFinalizations)
-            .where(
-              and(
-                eq(nativeRunFinalizations.runId, run.id),
-                eq(nativeRunFinalizations.companyId, run.companyId),
-                eq(nativeRunFinalizations.phase, "retryable_failure"),
-              ),
-            )
-            .then((rows) => rows.length > 0)
-        : false;
+      run.runtimeMode === "native" && run.status === "failed" && (
+        Boolean(options.cancellationRequestId) || await db
+          .select({ runId: nativeRunFinalizations.runId })
+          .from(nativeRunFinalizations)
+          .where(
+            and(
+              eq(nativeRunFinalizations.runId, run.id),
+              eq(nativeRunFinalizations.companyId, run.companyId),
+              eq(nativeRunFinalizations.phase, "retryable_failure"),
+            ),
+          )
+          .then((rows) => rows.length > 0)
+      );
     if (
       !pendingNativeRetry &&
       !CANCELLABLE_HEARTBEAT_RUN_STATUSES.includes(
@@ -29699,7 +29725,7 @@ export function heartbeatService(
     // Established legacy processes must still be stopped if the database is
     // unavailable. Only native or not-yet-dispatched preparation needs this
     // additional durable fence before its existing cancellation path.
-    if (run.runtimeMode === "native" || (!run.runtimeModeResolvedAt && !running && !control)) {
+    if (!options.cancellationRequestId && (run.runtimeMode === "native" || (!run.runtimeModeResolvedAt && !running && !control))) {
       const [fenced] = await db.update(heartbeatRuns).set({
         // Record handoff intent before native cancellation can finalize and release
         // the run. Only its audited stop acknowledgement suppresses recovery.
@@ -29789,6 +29815,7 @@ export function heartbeatService(
               runId: run.id,
               reason,
               runtimeMode: run.runtimeMode,
+              ...(options.cancellationRequestId ? { cancellationRequestId: options.cancellationRequestId } : {}),
             });
             if (running) {
               await terminateHeartbeatRunProcess({
@@ -29891,6 +29918,8 @@ export function heartbeatService(
                   }
                 : {}),
             },
+            undefined,
+            pendingNativeRetry ? nativeRetryCancellationCommitCondition(persistedCancellationResult) : undefined,
           );
         } catch (error) {
           if (processCancellationSettlement) {

@@ -252,6 +252,6 @@ export async function nativeCompletionFeedback(
   }
   const links = await savedDocumentLinks(db, run, issue);
   const documentGuidance = links.length
-    ? ` Include these clickable links to this run's saved documents in your final response: ${links.join(" ")}` : "";
-  return "Completion report accepted. Task status will be committed after this turn and workspace finalization finish. Describe the completed work and any explicitly requested reviewer action; do not claim an approval is needed unless one was requested." + documentGuidance;
+    ? ` When compatible with the requested response format, include these clickable links to this run's saved documents in your final response: ${links.join(" ")}` : "";
+  return "Completion report accepted. Task status will be committed after this turn and workspace finalization finish. Follow the user's explicitly requested final-response format, including an exact response when requested. Otherwise describe the completed work and any explicitly requested reviewer action. Do not claim an approval is needed unless one was requested." + documentGuidance;
 }
