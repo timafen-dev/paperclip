@@ -622,11 +622,6 @@ export function Costs({
             </div>
           ) : null}
 
-          {spendData?.summary.pricingComplete === false && (
-            <p role="status" className="text-sm text-destructive">
-              Spend is incomplete: {spendData.summary.unpricedEventCount} usage events have no reliable price; {spendData.summary.pendingRunCount} runs await accounting. Known spend is shown below.
-            </p>
-          )}
           {financeData?.summary.currencies?.some((row) => row.currency !== "USD") && (
             <p role="status" className="text-sm text-muted-foreground">
               Finance headline totals are USD only. Other currencies are listed separately; no exchange-rate conversion is applied.
@@ -673,6 +668,20 @@ export function Costs({
               icon={ArrowUpRight}
             />
           </div>
+          {spendData?.summary.pricingComplete === false && (
+            <div role="status" className="space-y-1 text-sm text-muted-foreground">
+              {spendData.summary.unpricedEventCount > 0 && (
+                <p>
+                  Costs are unavailable for {spendData.summary.unpricedEventCount} usage {spendData.summary.unpricedEventCount === 1 ? "entry" : "entries"} in this period. Totals include known costs only.
+                </p>
+              )}
+              {spendData.summary.pendingRunCount > 0 && (
+                <p>
+                  {spendData.summary.pendingRunCount} {spendData.summary.pendingRunCount === 1 ? "run is" : "runs are"} awaiting cost data.
+                </p>
+              )}
+            </div>
+          )}
         </div>
       ) : null}
 

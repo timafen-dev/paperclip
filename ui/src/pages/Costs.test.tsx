@@ -241,7 +241,7 @@ describe("Shared Costs surfaces", () => {
     } finally { queryClient.clear(); vi.useRealTimers(); }
   });
 
-  it.each(surfaces)("shows incomplete accounting and currency boundaries on the %s page", async (_name, props) => {
+  it.each(surfaces)("explains missing costs and pending runs neutrally on the %s page", async (_name, props) => {
     for (const mock of Object.values(costsApiMocks)) mock.mockResolvedValue([]);
     costsApiMocks.byUser.mockResolvedValue({ activeUserCount: 1, rows: [] });
     costsApiMocks.summary.mockResolvedValue({ spendCents: 12.4, budgetCents: 0, pricingComplete: false, unpricedEventCount: 2, pendingRunCount: 1 });
@@ -254,9 +254,26 @@ describe("Shared Costs surfaces", () => {
       root.render(<MemoryRouter><QueryClientProvider client={queryClient}><Costs {...props} /></QueryClientProvider></MemoryRouter>);
     });
     await act(async () => {
-      await vi.waitFor(() => expect(container.textContent).toContain("Spend is incomplete: 2 usage events have no reliable price; 1 runs await accounting."));
+      await vi.waitFor(() => expect(container.textContent).toContain("Costs are unavailable for 2 usage entries in this period. Totals include known costs only."));
     });
+    const notice = [...container.querySelectorAll('[role="status"]')].find(element => element.textContent?.includes("Costs are unavailable"))!;
+    expect(notice.classList.contains("text-muted-foreground")).toBe(true);
+    expect(notice.querySelector(".text-destructive")).toBeNull();
+    expect(notice.classList.contains("text-destructive")).toBe(false);
+    expect(notice.textContent).toContain("1 run is awaiting cost data.");
+    expect(notice.previousElementSibling?.textContent).toContain("Inference spend");
     expect(container.textContent).toContain("Finance headline totals are USD only");
+    costsApiMocks.summary.mockResolvedValue({ spendCents: 12.4, budgetCents: 0, pricingComplete: false, unpricedEventCount: 10, pendingRunCount: 0 });
+    await act(async () => { await queryClient.invalidateQueries(); });
+    await vi.waitFor(() => expect(notice.textContent).toContain("Costs are unavailable for 10 usage entries"));
+    expect(notice.textContent).not.toContain("awaiting cost data");
+    expect(notice.textContent).not.toContain("0 runs");
+    costsApiMocks.summary.mockResolvedValue({ spendCents: 12.4, budgetCents: 0, pricingComplete: false, unpricedEventCount: 0, pendingRunCount: 1 });
+    await act(async () => { await queryClient.invalidateQueries(); });
+    await vi.waitFor(() => expect(notice.textContent).toBe("1 run is awaiting cost data."));
+    costsApiMocks.summary.mockResolvedValue({ spendCents: 12.4, budgetCents: 0, pricingComplete: true, unpricedEventCount: 0, pendingRunCount: 0 });
+    await act(async () => { await queryClient.invalidateQueries(); });
+    await vi.waitFor(() => expect(container.contains(notice)).toBe(false));
   });
 
   it.each(surfaces)("labels each agent and expanded model independently on the %s page", async (_name, props) => {
