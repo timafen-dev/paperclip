@@ -1554,6 +1554,20 @@ for contracts, recovery behavior, Storybook, and acceptance workflows.
 
 Board may override by raising budget or explicitly resuming agent.
 
+Native runs retain final usage receipts during a bounded accounting-only drain
+after a governed wait cancels provider work. This does not accept late messages,
+tool calls, or new completion proposals. Missing or incomplete receipts continue
+to block budget admission.
+A controller that detaches for server restart loses checkpoint and completion
+write authority. A closing event stream is not proof that the governed run
+finished; the replacement controller must adopt and settle the original run.
+
+Complete direct Anthropic API receipts for `claude-sonnet-5` can use a versioned
+list-price estimate when the provider supplies no run price. The receipt records
+the rates and assumptions. Aggregate cache writes use the one-hour rate because
+their TTL is unknown. Estimates are not invoices. Other models, billers, unknown
+billing types, and incomplete receipts remain unpriced.
+
 ## 13.3 Cost Event Ingestion
 
 `POST /companies/:companyId/cost-events` body:
