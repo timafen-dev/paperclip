@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, createDb, heartbeatRuns, issues, issueThreadInteractions, issueDocuments } from "@paperclipai/db";
+import { agents, companies, createDb, documentRevisions, heartbeatRuns, issues, issueThreadInteractions, issueDocuments } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import type { PrpStructuredRunResult } from "../../vendor/paperclip-runner/index.js";
 import { documentService } from "../documents.js";
@@ -111,8 +111,15 @@ describe("native final-response feedback", () => {
     await db.insert(heartbeatRuns).values({ id: finishingRunId, companyId: value.companyId, agentId: value.agentId,
       nativeIssueId: value.issueId, status: "running", runtimeMode: "native", contextSnapshot: { issueId: value.issueId } });
     await db.update(issues).set({ executionRunId: finishingRunId }).where(eq(issues.id, value.issueId));
-    // The document remains attached, but its receipt's originating run is not task-scoped.
-    await db.update(heartbeatRuns).set({ nativeIssueId: otherIssueId }).where(eq(heartbeatRuns.id, value.runId));
+    // Run bindings are immutable. Attribute the revision to a separately bound
+    // foreign-task run with the same receipt instead of changing the source run.
+    const foreignRunId = randomUUID();
+    const [sourceRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, value.runId));
+    await db.insert(heartbeatRuns).values({ id: foreignRunId, companyId: value.companyId, agentId: value.agentId,
+      nativeIssueId: otherIssueId, status: "succeeded", runtimeMode: "native",
+      contextSnapshot: { issueId: otherIssueId }, resultJson: sourceRun.resultJson });
+    await db.update(documentRevisions).set({ createdByRunId: foreignRunId })
+      .where(eq(documentRevisions.id, value.saved.document.latestRevisionId));
     await expect(nativeCompletionFeedback(db, finishingRunId, done)).rejects.toThrow("write_document");
   });
   it.each([
