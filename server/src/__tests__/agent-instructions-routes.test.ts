@@ -176,7 +176,7 @@ function makeReflectionCoachAgent(overrides: Record<string, unknown> = {}) {
 }
 
 describe("agent instructions bundle routes", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     mockAuthorizeInstructionRead.mockImplementation(async (_db, actor) => actor);
     mockInstructionRevisions.readCurrent.mockResolvedValue(null);
@@ -248,7 +248,13 @@ describe("agent instructions bundle routes", () => {
         instructionsFilePath: "/tmp/agent-1/AGENTS.md",
       },
     });
-  });
+    // Cold route compilation belongs to fixture setup. Timing it as a request
+    // let a timed-out import resume under the next case's reset mocks.
+    await Promise.all([
+      vi.importActual("../routes/agents.js"),
+      vi.importActual("../middleware/index.js"),
+    ]);
+  }, 60_000);
 
   it("returns bundle metadata", async () => {
     const res = await requestApp(
