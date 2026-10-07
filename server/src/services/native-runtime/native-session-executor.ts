@@ -27,6 +27,11 @@ import { bindManagedNativeCredentialTurn, completeManagedNativeCredentialTurn } 
 import { createLocalNativeQuestionBridge } from "./local-native-question-bridge.js";
 import { readVerifiedRemoteWorkspaceFile } from "./remote-deliverable-file.js";
 import { copyBackCodexAuth } from "@paperclipai/adapter-codex-local/server";
+import {
+  codexCliVersionAtLeast,
+  minimumCodexCliVersionForModel,
+  normalizeCodexModel,
+} from "@paperclipai/adapter-codex-local";
 import { nativeCompletionFeedback } from "./native-completion-feedback.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent } from "../acknowledged-native-stop.js";
 import { stoppedCodexTurnIsTextOnly } from "./stopped-codex-turn.js";
@@ -11331,6 +11336,21 @@ async function createRunnerdBackendWithinSessionClaim(
     if (!version || !isSupportedRemoteCodexVersion(version)) {
       throw new Error(
         `runner_remote_provider_artifact_incompatible: supported Codex versions ${REMOTE_CODEX_SUPPORTED_RANGE}, received ${version ?? "an unrecognized or prerelease version"}; install a supported stable Codex release or configure PAPERCLIP_RUNNER_REMOTE_CODEX_NPM_SPEC=@openai/codex@${REMOTE_PROVIDER_PACK_PINS.codex}`,
+      );
+    }
+    // A Codex inside the compatibility window can still be too old for the
+    // configured model: the ChatGPT backend rejects a model from clients
+    // below the model's floor on every turn. Fail before launch with the
+    // exact gap, so a stale sandbox image is not reported as an account
+    // problem. When a preinstalled Codex fails here and an npm spec is
+    // configured, the caller falls back to installing the pinned release.
+    const configuredModel = input.execution.provider.kind === "codex"
+      ? input.execution.provider.model
+      : null;
+    const modelMinimum = minimumCodexCliVersionForModel(configuredModel);
+    if (modelMinimum && !codexCliVersionAtLeast(version, modelMinimum)) {
+      throw new Error(
+        `runner_remote_provider_artifact_incompatible: ${normalizeCodexModel(configuredModel)} requires Codex ${modelMinimum} or newer with ChatGPT sign-in, received ${version} from the sandbox image; promote a sandbox image with Codex ${REMOTE_PROVIDER_PACK_PINS.codex} or configure PAPERCLIP_RUNNER_REMOTE_CODEX_NPM_SPEC=@openai/codex@${REMOTE_PROVIDER_PACK_PINS.codex}`,
       );
     }
     if (version !== REMOTE_PROVIDER_PACK_PINS.codex && !reportedCodexVersions.has(version)) {

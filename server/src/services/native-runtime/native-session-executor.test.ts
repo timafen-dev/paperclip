@@ -11968,6 +11968,95 @@ describe("runnerd provider runtime wiring", () => {
     ).toBe(false);
   });
 
+  it.each([
+    { version: "0.156.0", model: "gpt-6.1-sol", floor: "0.159.0" },
+    { version: "0.158.0", model: "gpt-6.1-sol", floor: "0.159.0" },
+    { version: "0.156.0", model: "gpt-6-sol", floor: "0.157.0" },
+    { version: "0.156.0", model: "gpt-6-luna", floor: "0.157.0" },
+    { version: "0.159.0", model: "gpt-6.1-sol", floor: null },
+    { version: "0.160.0", model: "gpt-6.1-sol", floor: null },
+    { version: "0.157.0", model: "gpt-6-sol", floor: null },
+    { version: "0.156.0", model: "gpt-5.6-sol", floor: null },
+    { version: "0.156.0", model: null, floor: null },
+  ])("rejects a sandbox Codex $version below the ChatGPT floor for $model before launch (floor=$floor)", async ({ version, model, floor }) => {
+    // A preinstalled Codex inside the compatibility window can still be too
+    // old for the configured model: the ChatGPT backend rejects every turn
+    // with "not supported when using Codex with a ChatGPT account". The
+    // verifier names the stale image instead of letting the run fail as an
+    // account problem.
+    const gatedExecution = {
+      ...execution,
+      provider: { kind: "codex", model, approvalPolicy: "never" },
+      binding: { ...execution.binding, runId: `run-codex-floor-${version}-${model ?? "default"}` },
+    } as NativeExecutionInputV1;
+    const onLog = vi.fn(async () => undefined);
+    const syncIn = vi.fn(async () => undefined);
+    const remoteExecute = vi.fn(
+      async (command: { command: string; args?: string[] }) => {
+        let stdout = "";
+        const script = command.args?.[1] ?? "";
+        if (command.args?.[0] === "--build-metadata") {
+          stdout = JSON.stringify({
+            schema: "paperclip-runner/runnerd-build-metadata/v1",
+            binaryName: "paperclip-runnerd",
+            packageName: "@paperclipai/paperclip-runner",
+            binaryContractVersion: 2,
+            durableSessionCapabilities: ["unlimited_runtime", "connection_lease_renewal"],
+            prpTransportModes: ["listen_ws"],
+          });
+        } else if (command.args?.[0] === "--version") {
+          if (command.command.endsWith("/.paperclip-runtime/paperclip-runner/bin/codex")) {
+            throw new Error("reached-preinstalled-codex-verification");
+          }
+          stdout = `codex-cli ${version}`;
+        } else if (script === "uname -s; uname -m") {
+          stdout = `${process.platform === "darwin" ? "Darwin" : "Linux"}\n${process.arch === "arm64" ? "arm64" : "x86_64"}\n`;
+        } else if (script.includes("command -v paperclip-runnerd")) {
+          stdout = "/usr/local/bin/paperclip-runnerd\n";
+        } else if (script.includes("command -v codex")) {
+          stdout = "/opt/paperclip-runner/bin/codex\n";
+        } else if (!script.includes("ln -sfn") && !script.includes("paperclip_codex_launcher_tmp")) {
+          throw new Error(`unexpected command: ${command.command}`);
+        }
+        return { exitCode: 0, signal: null, timedOut: false, stderr: "", stdout };
+      },
+    );
+    await createRunnerdBackend({
+      db: leaseDb(gatedExecution),
+      execution: gatedExecution,
+      runnerInstanceId: "runner-image-runtime",
+      onLog,
+      runnerIngressAuthorized: true,
+      runnerExecutionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        remoteCwd: "/workspace",
+        environmentId: "environment",
+        leaseId: "lease",
+        providerKey: "daytona",
+        effectiveCapabilities: { runnerWebSocketIngress: true },
+        runner: { execute: remoteExecute, syncIn },
+      } as never,
+    });
+    state.createTransport.mockClear();
+    state.createBackend.mock.calls.at(-1)![1].codexTransportFactory!();
+    const transport = state.createTransport.mock
+      .calls[0]![0] as RunnerTransportOptions & {
+      controlPlaneRegistration: (authority: unknown) => Promise<unknown>;
+    };
+    await expect(transport.controlPlaneRegistration({})).rejects.toThrow(
+      floor
+        ? `runner_remote_provider_artifact_incompatible: ${model} requires Codex ${floor} or newer with ChatGPT sign-in, received ${version} from the sandbox image; promote a sandbox image with Codex 0.160.0 or configure PAPERCLIP_RUNNER_REMOTE_CODEX_NPM_SPEC=@openai/codex@0.160.0`
+        : "reached-preinstalled-codex-verification",
+    );
+    if (floor) {
+      // No npm spec is configured, so there is no fallback install; the run
+      // fails before launch instead of running against the stale CLI.
+      expect(remoteExecute.mock.calls.some(([call]) => call.command === "npm")).toBe(false);
+      expect(remoteExecute.mock.calls.some(([call]) => call.args?.[1]?.includes("paperclip_codex_launcher_tmp"))).toBe(false);
+    }
+  });
+
   it("binds a remote launch to the configured controller-owned runner artifact", async () => {
     const remoteCwd = "/home/daytona/paperclip-workspace";
     const controllerArtifact = "/controller/artifacts/paperclip-runnerd";
