@@ -226,15 +226,15 @@ When authoring migrations or one-time backfills:
 - Split schema changes, index creation, and data backfill into separate phases so each step has clear locking and rollback behavior.
 - Treat the `check:migrations` CI gate as the enforcement backstop for these rules. If it flags a migration, rewrite the migration or add a suppression comment with the indexed predicate, batch bound, and reason the remaining scan is safe.
 
-Private-task migration `0313` is explicitly allowlisted in the
-Paperclip executor to run outside a file-wide transaction. Its idempotent
+Private-task migrations `0313` and `0314` are explicitly allowlisted in the
+Paperclip executor to run outside a file-wide transaction. Their idempotent
 keyset batches commit every 1,000 rows, and migration history is recorded only
 when all batches finish. The executor repairs invalid concurrent indexes on
 retry. A reserved connection holds a session advisory lock across all batch
 commits, so concurrent migrators recheck history only after the preceding runner
 finishes. Privacy triggers are replaced atomically. Bootstrap uses the same
 executor; other migrations remain transactional
-per file. Apply this migration through `pnpm db:migrate` using a direct
+per file. Apply these migrations through `pnpm db:migrate` using a direct
 connection, before enabling the new server and UI.
 
 ## Migration snapshots

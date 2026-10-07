@@ -680,6 +680,7 @@ export type {
   IssueSubtreeDiagnosticEdge,
   IssueSubtreeDiagnosticsResponse,
   IssueVisibility,
+  IssuePrivacyConstraints,
   IssueAccessGrant,
   IssueAccessGrantAgentVisibility,
   IssueAccessGrantSubjectType,
