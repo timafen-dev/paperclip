@@ -15,6 +15,7 @@ import {
   agentWakeupRequests,
   activityLog,
   costEvents,
+  budgetReservations,
   heartbeatRunEvents,
   heartbeatRuns,
   issueExecutionDecisions,
@@ -1098,6 +1099,13 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       }
 
       return withAccountingTransaction(db, existing.companyId, async (tx) => {
+        const [decisionHold] = await tx.select({ id: budgetReservations.id }).from(budgetReservations).where(and(
+          eq(budgetReservations.companyId, existing.companyId), eq(budgetReservations.agentId, id),
+          eq(budgetReservations.state, "held"), sql`${budgetReservations.decisionInvocationId} is not null`,
+        )).limit(1);
+        if (decisionHold) throw conflict("Wait for active decisions or resolve their unknown charges in Costs before deleting this agent", {
+          code: "agent_decision_accounting_pending",
+        });
         await tx
           .select({ id: agents.id })
           .from(agents)

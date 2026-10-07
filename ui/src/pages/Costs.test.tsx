@@ -12,6 +12,7 @@ const resolveIncidentMock = vi.hoisted(() => vi.fn());
 const upsertPolicyMock = vi.hoisted(() => vi.fn());
 const budgetOverviewMock = vi.hoisted(() => vi.fn());
 const setBreadcrumbsMock = vi.hoisted(() => vi.fn());
+const decisionHistoryMock = vi.hoisted(() => vi.fn());
 const costsApiMocks = vi.hoisted(() => ({
   summary: vi.fn(),
   byAgent: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock("../api/budgets", () => ({
 }));
 
 vi.mock("../api/costs", () => ({ costsApi: costsApiMocks }));
+vi.mock("../api/decision-models", () => ({ decisionModelsApi: { history: decisionHistoryMock } }));
 
 vi.mock("../context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: "company-1" }),
@@ -61,6 +63,7 @@ describe("Shared Costs surfaces", () => {
   let root: ReturnType<typeof createRoot>;
 
   beforeEach(() => {
+    decisionHistoryMock.mockResolvedValue([]);
     costsApiMocks.byUser.mockResolvedValue({ activeUserCount: 1, rows: [] });
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -95,7 +98,7 @@ describe("Shared Costs surfaces", () => {
     await act(async () => {
       root.render(
         <QueryClientProvider client={queryClient}>
-          <Costs embedded initialTab="budgets" lockTab />
+          <MemoryRouter><Costs embedded initialTab="budgets" lockTab /></MemoryRouter>
         </QueryClientProvider>,
       );
       await Promise.resolve();
@@ -113,6 +116,23 @@ describe("Shared Costs surfaces", () => {
     for (const mock of Object.values(costsApiMocks)) expect(mock).not.toHaveBeenCalled();
   });
 
+  it("opens linked decision history with real date bounds instead of report cache labels", async () => {
+    for (const mock of Object.values(costsApiMocks)) mock.mockResolvedValue([]);
+    costsApiMocks.byUser.mockResolvedValue({ activeUserCount: 1, rows: [] });
+    costsApiMocks.summary.mockResolvedValue({ spendCents: 0, budgetCents: 0, pricingComplete: true });
+    costsApiMocks.financeSummary.mockResolvedValue({ netCents: 0, debitCents: 0, creditCents: 0, estimatedDebitCents: 0, eventCount: 0 });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    root = createRoot(container);
+    await act(async () => root.render(<MemoryRouter initialEntries={["/?tab=decisions"]}><QueryClientProvider client={queryClient}><Costs /></QueryClientProvider></MemoryRouter>));
+    await act(async () => { await vi.waitFor(() => expect(container.textContent).toContain("No decision requests in this period")); });
+    expect(container.querySelector('[role="tab"][data-state="active"]')?.textContent).toBe("Decisions");
+    const [companyId, from, to] = decisionHistoryMock.mock.lastCall!;
+    expect(companyId).toBe("company-1");
+    expect(Number.isFinite(Date.parse(from))).toBe(true);
+    expect(Number.isFinite(Date.parse(to))).toBe(true);
+    queryClient.clear();
+  });
+
   it.each([
     ["reservation", 500, "agent"], ["unknown price", 500, "agent"], ["amount", 500, "agent"],
     ["amount", 0, "company"], ["amount", 0, "agent"], ["amount", 0, "project"],
@@ -126,7 +146,7 @@ describe("Shared Costs surfaces", () => {
     upsertPolicyMock.mockResolvedValue({});
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     root = createRoot(container);
-    await act(async () => root.render(<QueryClientProvider client={queryClient}><Costs embedded initialTab="budgets" lockTab /></QueryClientProvider>));
+    await act(async () => root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Costs embedded initialTab="budgets" lockTab /></MemoryRouter></QueryClientProvider>));
     await act(async () => { await vi.waitFor(() => expect(container.querySelector('[aria-label="Reserve per run (USD)"]')).not.toBeNull()); });
     const advanced = container.querySelector("details")!;
     expect(advanced.open).toBe(false);
@@ -159,7 +179,7 @@ describe("Shared Costs surfaces", () => {
     upsertPolicyMock.mockRejectedValueOnce(new Error("private SQL policy error"));
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     root = createRoot(container);
-    await act(async () => root.render(<QueryClientProvider client={queryClient}><Costs embedded initialTab="budgets" lockTab /></QueryClientProvider>));
+    await act(async () => root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Costs embedded initialTab="budgets" lockTab /></MemoryRouter></QueryClientProvider>));
     await act(async () => { await vi.waitFor(() => expect(container.querySelector('input[type="checkbox"]')).not.toBeNull()); });
     const reservation = container.querySelector<HTMLInputElement>('[aria-label="Reserve per run (USD)"]')!;
     const originalReservation = reservation.value;
@@ -335,7 +355,7 @@ describe("Shared Costs surfaces", () => {
       expect(setBreadcrumbsMock).toHaveBeenCalledWith([{ label: "Costs" }]);
     }
     expect([...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent)).toEqual(
-      streamlined ? ["Overview", "Providers", "Billers", "Finance"] : ["Overview", "Budgets", "Providers", "Billers", "Finance"],
+      streamlined ? ["Overview", "Providers", "Billers", "Finance", "Decisions"] : ["Overview", "Budgets", "Providers", "Billers", "Finance", "Decisions"],
     );
   });
 

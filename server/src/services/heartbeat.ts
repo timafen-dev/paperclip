@@ -2,6 +2,7 @@ import { preserveWorkspaceRestoreRecoveryMetadataSql } from "./legacy-workspace-
 import { preserveWorkspaceRestoreRecoveryMetadata } from "./workspace-restore-recovery-state.js";
 import { recordLegacyWorkspaceRestoreFailure } from "./legacy-execution-recovery.js";
 import { CONFIGURED_ENVIRONMENT_KEYS, configuredEnvironmentProjection } from "../vendor/paperclip-runner/index.js";
+import { decisionModelService } from "./decision-models.js";
 import { activeIssueInteractionCondition, TASK_QUESTION_GUIDANCE } from "./issue-question-context.js";
 import { createAgentIdentityRedactor } from "./agent-identity-redaction.js";
 import { agentIdentityService, supportsManagedAgentIdentity } from "./agent-identity.js";
@@ -30667,7 +30668,10 @@ export function heartbeatService(
     scanSilentActiveRuns,
 
     reconcileTaskWatchdogs,
-    reconcileCostAccounting: createCostAccountingReconciler(db, budgetHooks),
+    reconcileCostAccounting: async () => {
+      await decisionModelService(db, { budgetHooks }).recoverInterrupted();
+      return createCostAccountingReconciler(db, budgetHooks)();
+    },
 
     buildRunOutputSilence,
 
