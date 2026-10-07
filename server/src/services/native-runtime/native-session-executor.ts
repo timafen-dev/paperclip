@@ -1,3 +1,4 @@
+import { configuredEnvironment } from "../../vendor/paperclip-runner/index.js";
 import { CURSOR_DISTRIBUTION_PINS, QUALIFIED_ACPX_PROFILES, QUALIFIED_ACPX_VERSION } from "../../vendor/paperclip-runner/index.js";
 import { isProviderMode } from "../../vendor/paperclip-runner/index.js";
 import { bundledRemoteProviderPackManifestPath, bundledRemoteRunnerBinary } from "../../vendor/paperclip-runner/index.js";
@@ -413,6 +414,7 @@ type WarmNativeSession = {
   session: NativeSession;
   ownerToken: symbol;
   configDigest: string;
+  configuredEnvironmentDigest: string;
   ownerScope: string;
   companyId: string;
   environmentId: string | null;
@@ -8268,6 +8270,9 @@ async function executePaperclipNativeSessionWithinScope(
           input.runnerExecutionTarget?.kind ?? "local",
         )
       : null;
+  const configuredEnvironmentDigest = createHash("sha256")
+    .update(JSON.stringify(configuredEnvironment(input.runnerEnvironment)))
+    .digest("hex");
   const warmSessionOwnerToken = Symbol(
     `native-warm-session:${input.execution.binding.runId}`,
   );
@@ -8294,6 +8299,7 @@ async function executePaperclipNativeSessionWithinScope(
         input.refreshTools === true ||
         entry.closeOnReleaseReason !== undefined ||
         entry.configDigest !== warmConfigDigest ||
+        entry.configuredEnvironmentDigest !== configuredEnvironmentDigest ||
         entry.instructionCopy?.root !== input.instructionWorkingCopy?.root ||
         entry.managedAiCredentialIdentity !== input.managedAiCredentialIdentity ||
         credentialRunChanged ||
@@ -8674,6 +8680,7 @@ async function executePaperclipNativeSessionWithinScope(
                     session,
                     ownerToken: warmSessionOwnerToken,
                     configDigest: warmConfigDigest,
+                    configuredEnvironmentDigest,
                     ownerScope: nativeSessionOwnerScope(
                       input.execution, input.runnerExecutionTarget?.environmentId ?? null,
                     ),

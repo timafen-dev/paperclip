@@ -139,3 +139,8 @@ export const completeTerminatedLocalNativeSessionCleanup = runner.completeTermin
 
 export const bundledRemoteProviderPackManifestPath = runner.bundledRemoteProviderPackManifestPath;
 export const bundledRemoteRunnerBinary = runner.bundledRemoteRunnerBinary;
+
+export const CONFIGURED_ENVIRONMENT_KEYS = runner.CONFIGURED_ENVIRONMENT_KEYS;
+export const GENERATED_RUNTIME_ENVIRONMENT_KEYS = runner.GENERATED_RUNTIME_ENVIRONMENT_KEYS;
+export const configuredEnvironmentProjection = runner.configuredEnvironmentProjection;
+export const configuredEnvironment = runner.configuredEnvironment;
