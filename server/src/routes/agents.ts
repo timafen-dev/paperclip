@@ -5282,7 +5282,7 @@ export function agentRoutes(
       let rawEffectiveAdapterConfig = requestedAdapterConfig
         ? restoreRedactedAgentEnv(requestedAdapterConfig, existingAdapterConfig)
         : changingAdapterType ? {} : existingAdapterConfig;
-      if (requestedAdapterConfig && !replaceAdapterConfig) {
+      if (requestedAdapterConfig && !changingAdapterType && !replaceAdapterConfig) {
         rawEffectiveAdapterConfig = mergeAdapterConfigPatch(existingAdapterConfig, rawEffectiveAdapterConfig);
       }
       if (changingAdapterType) {
@@ -5291,6 +5291,17 @@ export function agentRoutes(
         // adapterConfig but omits these keys would silently drop them.
         for (const key of ADAPTER_AGNOSTIC_KEYS) {
           if (KNOWN_INSTRUCTIONS_BUNDLE_KEY_SET.has(key)) continue;
+          if (key === "env" && !replaceAdapterConfig) {
+            const existingEnv = asRecord(existingAdapterConfig.env);
+            const requestedEnv = asRecord(rawEffectiveAdapterConfig.env);
+            if (existingEnv && requestedEnv) {
+              rawEffectiveAdapterConfig = {
+                ...rawEffectiveAdapterConfig,
+                env: { ...existingEnv, ...requestedEnv },
+              };
+              continue;
+            }
+          }
           if (rawEffectiveAdapterConfig[key] === undefined && existingAdapterConfig[key] !== undefined) {
             rawEffectiveAdapterConfig = { ...rawEffectiveAdapterConfig, [key]: existingAdapterConfig[key] };
           }

@@ -781,6 +781,8 @@ describe("agent instructions bundle routes", () => {
       ...makeAgent(),
       adapterType: "codex_local",
       adapterConfig: {
+        model: "gpt-5.4",
+        dangerouslyBypassApprovalsAndSandbox: true,
         env: {
           CODEX_HOME: "/paperclip/companies/company-1/agents/agent-1/codex-home",
         },
@@ -818,6 +820,10 @@ describe("agent instructions bundle routes", () => {
       }),
       expect.any(Object),
     );
+    const persistedConfig = mockAgentService.update.mock.calls[0]?.[1]
+      ?.adapterConfig as Record<string, unknown>;
+    expect(persistedConfig.model).toBeUndefined();
+    expect(persistedConfig.dangerouslyBypassApprovalsAndSandbox).toBeUndefined();
   });
 
   it("replaces adapter config when replaceAdapterConfig is true", async () => {
