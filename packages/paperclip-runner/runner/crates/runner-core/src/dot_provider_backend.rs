@@ -165,6 +165,7 @@ impl State {
             "tool" => &["name", "arguments"],
             "progress" => &["text"],
             "finish" => &["result"],
+            "renew" => &["expiresAtUnixMs"],
             _ => return Err(invalid("Dot action is unsupported")),
         };
         if op.input.as_object().is_none_or(|input| {
@@ -408,6 +409,20 @@ impl DotCommandExecutor {
                     "content":{"digest":semantic_value_digest(&args),"redactionDisposition":"digest_only","references":[]},"input":args}}))?;
                 // ACK releases the command lane. semantic_tool.result settles this operation later.
                 return Ok(json!({"status":"pending","requestId":id}));
+            }
+            "renew" => {
+                let expiry = op.input["expiresAtUnixMs"]
+                    .as_u64()
+                    .ok_or_else(|| invalid("Dot renewal expiry missing"))?;
+                if state.lifecycle != "running"
+                    || expiry <= now
+                    || expiry > now + 2 * 60 * 60 * 1000
+                    || expiry > state.descriptor.accept_by_unix_ms + 24 * 60 * 60 * 1000
+                {
+                    return Err(invalid("Dot renewal exceeds current authority bounds"));
+                }
+                state.descriptor.expires_at_unix_ms = expiry;
+                json!({"status":"renewed","expiresAtUnixMs":expiry})
             }
             "progress" => {
                 if state.lifecycle != "running" {
@@ -817,6 +832,50 @@ mod tests {
             operation("accept-1", "accept", json!({})),
         );
     }
+    #[test]
+    fn renewal_is_durable_bounded_and_cannot_revive_fenced_authority() {
+        let dir = TestDirectory::new();
+        let mut executor = prepared(dir.path());
+        call(
+            &mut executor,
+            "external_provider.operation",
+            operation("accept", "accept", json!({})),
+        );
+        let expiry = crate::durable::current_unix_ms().unwrap() + 60 * 60 * 1000;
+        let renew = operation("renew", "renew", json!({"expiresAtUnixMs":expiry}));
+        assert_eq!(
+            call(&mut executor, "external_provider.operation", renew.clone())["status"],
+            "renewed"
+        );
+        assert_eq!(
+            call(&mut executor, "external_provider.operation", renew.clone())["expiresAtUnixMs"],
+            expiry
+        );
+        assert!(executor
+            .execute(&command(
+                "external_provider.operation",
+                operation(
+                    "too-long",
+                    "renew",
+                    json!({"expiresAtUnixMs":expiry + 24 * 60 * 60 * 1000})
+                )
+            ))
+            .is_err());
+        drop(executor);
+        let mut recovered = DotCommandExecutor::with_runner_config(dir.path(), &config(dir.path()));
+        assert_eq!(
+            call(&mut recovered, "external_provider.operation", renew)["expiresAtUnixMs"],
+            expiry
+        );
+        recovered.state.as_mut().unwrap().lifecycle = "fenced".into();
+        assert!(recovered
+            .execute(&command(
+                "external_provider.operation",
+                operation("fenced", "renew", json!({"expiresAtUnixMs":expiry}))
+            ))
+            .is_err());
+    }
+
     #[test]
     fn acceptance_is_explicit_and_tool_receipts_survive_restart_without_reexecution() {
         let dir = TestDirectory::new();

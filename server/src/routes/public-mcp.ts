@@ -75,7 +75,7 @@ export function publicMcpIngressRoutes(oauth: PublicMcpOAuth, execute: ReturnTyp
     resource_name: agentConnection ? "Paperclip Dot agent" : "Paperclip",
   }));
   router.get(metadataPath, (_req, res) => res.json({
-    issuer, authorization_endpoint: prefix + "/authorize", token_endpoint: prefix + "/token",
+    issuer, authorization_endpoint: (oauth.config.authorizationOrigin ?? origin) + oauthPath + "/authorize", token_endpoint: prefix + "/token",
     registration_endpoint: prefix + "/register", revocation_endpoint: prefix + "/revoke",
     response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token", DEVICE_GRANT],
     device_authorization_endpoint: prefix + "/device_authorization",
@@ -207,7 +207,7 @@ export function publicMcpManagementRoutes(oauth: PublicMcpOAuth, agentOAuth?: Pu
   };
   const sameOrigin: RequestHandler = (req, _res, next) => {
     const origin = req.headers.origin ?? (req.headers.referer ? new URL(req.headers.referer).origin : "");
-    if (origin !== oauth.config.origin) throw new McpOAuthError("access_denied", "Connection changes require the Paperclip browser origin.", 403);
+    if (origin !== oauth.config.origin && origin !== oauth.config.authorizationOrigin) throw new McpOAuthError("access_denied", "Connection changes require the Paperclip browser origin.", 403);
     next();
   };
   router.use("/mcp", (_req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
@@ -228,6 +228,16 @@ export function publicMcpManagementRoutes(oauth: PublicMcpOAuth, agentOAuth?: Pu
       if (base.protocol === "https:") setupUrl = new URL("/orgs/new", base).toString();
     }
     res.json(await (await requestOAuth(String(req.params.id))).describeRequest(String(req.params.id), req.actor, setupUrl));
+  });
+  router.post("/mcp/requests/:id/dot-pairing/preview", sameOrigin, authRateLimit(), async (req, res) => {
+    const parsed = z.object({ pairingCode: z.string().regex(/^[A-Za-z0-9_-]{32}$/) }).strict().safeParse(req.body);
+    if (!parsed.success) throw new McpOAuthError("invalid_request", "Enter the one-use code from the Dot setup prompt.");
+    res.json(await (await requestOAuth(String(req.params.id))).describeDotPairing(String(req.params.id), parsed.data.pairingCode));
+  });
+  router.post("/mcp/requests/:id/dot-pairing", sameOrigin, authRateLimit(), async (req, res) => {
+    const parsed = z.object({ pairingCode: z.string().regex(/^[A-Za-z0-9_-]{32}$/) }).strict().safeParse(req.body);
+    if (!parsed.success) throw new McpOAuthError("invalid_request", "Enter the one-use code from the Dot setup prompt.");
+    res.json(await (await requestOAuth(String(req.params.id))).consentDotPairing(String(req.params.id), parsed.data.pairingCode));
   });
   router.post("/mcp/requests/:id/consent", realUser, sameOrigin, async (req, res) => {
     const parsed = mcpConsentSchema.safeParse(req.body);

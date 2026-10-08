@@ -23,7 +23,7 @@ export function dotRunnerRoutes(db: Db, resourceUrl?: string) {
   router.get(path, async (req, res) => {
     const input = scope(req);
     const config = resourceUrl ? null : publicMcpConfig(process.env);
-    res.json({ enabled: broker.enabled(), resourceUrl: resourceUrl ?? (config ? config.origin + "/mcp/runner" : null), binding: await broker.bindingForAgent(input.companyId, input.agentId) });
+    res.json({ enabled: await broker.enabled(), resourceUrl: resourceUrl ?? (config ? config.origin + "/mcp/runner" : null), binding: await broker.bindingForAgent(input.companyId, input.agentId) });
   });
   router.post(path, async (req, res) => {
     const input = scope(req, true);

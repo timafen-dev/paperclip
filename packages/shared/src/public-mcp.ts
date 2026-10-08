@@ -45,3 +45,12 @@ export interface McpConnection {
   createdAt: string;
   revokedAt: string | null;
 }
+
+/** Code-scoped details shown before activating an operator-approved Dot agent. */
+export interface McpDotPairingPreview {
+  company: { id: string; name: string };
+  agent: { id: string; name: string };
+  permissions: string;
+  accessDuration: string;
+  pairingExpiresAt: string;
+}

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, asc, count, inArray, eq, gt, gte, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
-import { companies, activityLog, dotMailboxItems, dotAgentBindings, dotRunnerAssignments, mcpEventAdmissions as admissions, mcpEventDeliveries as deliveries, mcpEventSubscriptions as subscriptions, type Db } from "@paperclipai/db";
+import { companies, activityLog, issueComments, heartbeatRuns, dotMailboxItems, dotAgentBindings, dotRunnerAssignments, mcpEventAdmissions as admissions, mcpEventDeliveries as deliveries, mcpEventSubscriptions as subscriptions, type Db } from "@paperclipai/db";
 import { dotRunnerBroker } from "../dot-runner-broker.js";
 import { ISSUE_STATUSES } from "@paperclipai/shared";
 import { localEncryptedProvider } from "../../secrets/local-encrypted-provider.js";
@@ -214,6 +214,20 @@ export function createPublicMcpEvents(db: Db, oauth: PublicMcpOAuth, api: ApiDis
       if (!options.enableDotRunner) return;
       const [b] = await db.select().from(dotAgentBindings).where(and(eq(dotAgentBindings.id, s.bindingId), eq(dotAgentBindings.companyId, s.companyId), isNull(dotAgentBindings.revokedAt)));
       if (!b) return;
+      // Materialize only references to newly recorded task input. This does not steer
+      // an external provider or create execution authority; the current run reads its history.
+      await db.transaction(async tx => {
+        const [current] = await tx.select().from(dotAgentBindings).where(eq(dotAgentBindings.id, b.id)).for("update");
+        if (!current || current.revokedAt || current.generation !== b.generation) return;
+        const incoming = await tx.select({ assignmentId: dotRunnerAssignments.id, commentId: issueComments.id })
+          .from(dotRunnerAssignments).innerJoin(heartbeatRuns, and(eq(heartbeatRuns.id, dotRunnerAssignments.runId), eq(heartbeatRuns.companyId, b.companyId), eq(heartbeatRuns.status, "running")))
+          .innerJoin(issueComments, and(eq(issueComments.issueId, heartbeatRuns.nativeIssueId), eq(issueComments.companyId, b.companyId)))
+          .where(and(eq(dotRunnerAssignments.companyId, b.companyId), eq(dotRunnerAssignments.bindingId, b.id), eq(dotRunnerAssignments.bindingGeneration, b.generation),
+            eq(dotRunnerAssignments.status, "accepted"), gt(dotRunnerAssignments.expiresAt, new Date(now())),
+            gte(issueComments.createdAt, dotRunnerAssignments.createdAt), sql`not exists (select 1 from ${dotMailboxItems} previous where previous.source_event_id = 'dot-follow-up:' || ${dotRunnerAssignments.id}::text || ':' || ${issueComments.id}::text)`, sql`(${issueComments.authorAgentId} is null or ${issueComments.authorAgentId} <> ${b.agentId})`)).limit(100);
+        for (const input of incoming) await tx.insert(dotMailboxItems).values({ companyId: b.companyId, bindingId: b.id, bindingGeneration: b.generation,
+          assignmentId: input.assignmentId, kind: "follow_up", sourceEventId: `dot-follow-up:${input.assignmentId}:${input.commentId}`, references: { assignmentId: input.assignmentId, commentId: input.commentId } }).onConflictDoNothing();
+      });
       const rows = await db.select({ item: dotMailboxItems, assignment: dotRunnerAssignments })
         .from(dotMailboxItems).leftJoin(dotRunnerAssignments, eq(dotRunnerAssignments.id, dotMailboxItems.assignmentId))
         .leftJoin(deliveries, and(eq(deliveries.subscriptionId, s.id), eq(deliveries.mailboxItemId, dotMailboxItems.id)))

@@ -24,7 +24,7 @@ export interface ExternalProviderOperation {
   turnId: string;
   assignmentRevision: number;
   digest: string;
-  action: "accept" | "tool" | "progress" | "finish";
+  action: "accept" | "tool" | "progress" | "finish" | "renew";
   input: Record<string, unknown>;
 }
 /** Broker port uses only the authenticated run's existing PRP command lane. */

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import type { HarnessDriver, HarnessSession, OpenHarnessSessionInput, PersistedHarnessSession } from "../../contracts/harness-driver.js";
+import type { HarnessDriver, HarnessDriverDescriptor, HarnessSession, OpenHarnessSessionInput, PersistedHarnessSession } from "../../contracts/harness-driver.js";
 import type { NativeExecutionInputV6 } from "../../contracts/native-execution.js";
 import type { ExternalProviderPort } from "../../contracts/external-provider.js";
 import type { PrpEvent } from "../../protocol/replay-contract.js";
@@ -33,12 +33,17 @@ const capabilities = {
   dynamicTools: true, unsupported: ["resume", "steering", "interruption", "usage", "goals", "runtimeRequestResolution", "threadLineage"],
 };
 
+/** The admission path can inspect Dot without allocating a broker port or Runner. */
+export function describeRunnerdDotDriver(): HarnessDriverDescriptor {
+  return { kind: "openai_dot_mcp", displayName: "OpenAI Dot", version: "dot-mcp-v1", protocolVersion: "prp.v3",
+    capabilities: structuredClone(capabilities), runtimeContextCapabilities: { instructions: "native", skills: "native", mcp: "native" } };
+}
+
 /** Thin SDK projection. Rust owns every lifecycle decision and durable receipt. */
 export class RunnerdDotDriver implements HarnessDriver {
   constructor(readonly options: RunnerdDotDriverOptions) {}
   async descriptor() {
-    return { kind: "openai_dot_mcp", displayName: "OpenAI Dot", version: "dot-mcp-v1", protocolVersion: "prp.v3",
-      capabilities, runtimeContextCapabilities: { instructions: "native" as const, skills: "unsupported" as const, mcp: "unsupported" as const } };
+    return describeRunnerdDotDriver();
   }
   async openSession(input: OpenHarnessSessionInput): Promise<HarnessSession> {
     if (input.runId !== this.options.identity.runId || input.normalizedSessionId !== this.options.identity.normalizedSessionId) {

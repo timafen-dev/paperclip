@@ -2234,11 +2234,16 @@ export function agentRoutes(
    * (listEnabledServerAdapters documents the same rule: hidden from selection,
    * still functional for agents that already use them).
    */
-  async function assertSelectableAdapterType(type: string | null | undefined): Promise<string> {
+  async function assertSelectableAdapterType(type: string | null | undefined, config?: unknown): Promise<string> {
     const adapterType = assertKnownAdapterType(type);
     if (adapterType === "paperclip_runner") {
       const experimental = await instanceSettings.getExperimental();
-      if (experimental.enableNativeRunner !== true) {
+      if (asRecord(config)?.provider === "openai_dot") {
+        if (experimental.enableOpenAiDot !== true) throw unprocessable(
+          "OpenAI Dot is experimental and disabled on this instance.",
+          { code: "paperclip_runner_dot_disabled" },
+        );
+      } else if (experimental.enableNativeRunner !== true) {
         throw unprocessable(
           "Paperclip Runner is experimental and disabled on this instance.",
           { code: "paperclip_runner_rollout_disabled" },
@@ -2990,6 +2995,8 @@ export function agentRoutes(
     adapterConfig: Record<string, unknown>,
     path = "adapterConfig",
   ) {
+    if (req.actor.type === "agent" && ["dotAttachmentAccess", "dotWorkspaceAccess", "dotBindingId"].some(key => hasOwn(adapterConfig, key)))
+      throw forbidden("Only an operator can configure Dot attachment access, workspace access, or pairing.");
     assertNoAgentInstructionsConfigMutation(req, adapterConfig, path);
     assertNoAgentHostWorkspaceCommandMutation(
       req,
@@ -3672,11 +3679,12 @@ export function agentRoutes(
           : inputAdapterConfig;
       }
       if (type === "paperclip_runner" && inputAdapterConfig.provider === "openai_dot") {
+        const dotEnabled = await dotRunnerBroker(db).enabled();
         const binding = savedAgentId ? await dotRunnerBroker(db).bindingForAgent(companyId, savedAgentId) : null;
         let resource: ReturnType<typeof publicMcpConfig> = null;
         try { resource = publicMcpConfig(process.env); } catch { /* diagnostic below */ }
         const checks: AdapterEnvironmentCheck[] = [
-          { code: "dot_enabled", level: dotRunnerBroker(db).enabled() ? "info" : "error", message: dotRunnerBroker(db).enabled() ? "Dot is enabled." : "Enable PAPERCLIP_ENABLE_OPENAI_DOT=1 on the server." },
+          { code: "dot_enabled", level: dotEnabled ? "info" : "error", message: dotEnabled ? "Dot is enabled." : "Enable OpenAI Dot and Assistant connections (MCP) in experimental settings." },
           { code: "dot_public_endpoint", level: resource?.origin.startsWith("https://") ? "info" : "error", message: resource?.origin.startsWith("https://") ? "Public HTTPS MCP origin is configured." : "Configure a stable public HTTPS PAPERCLIP_PUBLIC_URL." },
           { code: "dot_unmetered", level: inputAdapterConfig.allowUnmeteredProvider === true ? "info" : "error", message: "Dot usage and provider cost are unavailable. Explicit externally billed provider acknowledgement is required." },
           { code: "dot_binding", level: binding?.status === "ready" && binding.subscriptionVerified && binding.id === inputAdapterConfig.dotBindingId ? "info" : "warn", message: binding?.status === "ready" && binding.subscriptionVerified ? "Binding has a verified event subscription and completed readiness challenge." : "Save this agent, pair it, subscribe to mailbox events and complete the event test." },
@@ -4582,10 +4590,13 @@ export function agentRoutes(
         ? rollbackConfig.adapterType
         : null,
     );
-    if (rollbackAdapterType !== existing.adapterType) {
-      await assertSelectableAdapterType(rollbackAdapterType);
-    }
     const rollbackAdapterConfig = asRecord(rollbackConfig.adapterConfig) ?? {};
+    const existingRollbackProvider = asRecord(existing.adapterConfig)?.provider;
+    if (rollbackAdapterType !== existing.adapterType || (rollbackAdapterType === "paperclip_runner"
+      && rollbackAdapterConfig.provider !== existingRollbackProvider
+      && (rollbackAdapterConfig.provider === "openai_dot" || existingRollbackProvider === "openai_dot"))) {
+      await assertSelectableAdapterType(rollbackAdapterType, rollbackAdapterConfig);
+    }
     assertNoAgentAdapterConfigMutation(req, rollbackAdapterConfig);
     assertNoAgentLocalAdapterHostCommandMutation(req, rollbackAdapterType, rollbackAdapterConfig);
     assertNoAgentProcessAdapterMutation(
@@ -4742,7 +4753,7 @@ export function agentRoutes(
       hireInput.adapterConfig = inheritNativeRunnerAdapterConfig(caller.adapterConfig);
       hireInput.defaultEnvironmentId = caller.defaultEnvironmentId ?? null;
     }
-    hireInput.adapterType = await assertSelectableAdapterType(hireInput.adapterType);
+    hireInput.adapterType = await assertSelectableAdapterType(hireInput.adapterType, hireInput.adapterConfig);
     const rawHireAdapterConfig = (hireInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertProviderTraceSettingTransition(req, hireInput.runtimeConfig);
     await assertFreshPaperclipRunnerProvider(
@@ -5055,7 +5066,7 @@ export function agentRoutes(
       onboardingFirstAgent: createOnboardingFirstAgent,
       ...createInput
     } = req.body;
-    createInput.adapterType = await assertSelectableAdapterType(createInput.adapterType);
+    createInput.adapterType = await assertSelectableAdapterType(createInput.adapterType, createInput.adapterConfig);
     const rawCreateAdapterConfig = (createInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertProviderTraceSettingTransition(req, createInput.runtimeConfig);
     await assertFreshPaperclipRunnerProvider(
@@ -5700,7 +5711,7 @@ export function agentRoutes(
       : existing.adapterType;
     const requestedAdapterType = nextAdapterType === existing.adapterType
       ? nextAdapterType
-      : await assertSelectableAdapterType(nextAdapterType);
+      : await assertSelectableAdapterType(nextAdapterType, patchData.adapterConfig);
     let requestedRuntimeConfig: Record<string, unknown> | null = null;
     if (hasOwn(patchData, "runtimeConfig")) {
       const runtimeConfig = asRecord(patchData.runtimeConfig);
@@ -5801,6 +5812,13 @@ export function agentRoutes(
         existing.adapterType === "paperclip_runner"
           ? existingAdapterConfig.provider
           : undefined;
+      // Moving between the standalone Dot choice and general Runner is a new
+      // selection. Preserve historical edits within the general Runner rollout.
+      if (!changingAdapterType && requestedAdapterType === "paperclip_runner"
+        && rawEffectiveAdapterConfig.provider !== existingRunnerProvider
+        && (rawEffectiveAdapterConfig.provider === "openai_dot" || existingRunnerProvider === "openai_dot")) {
+        await assertSelectableAdapterType(requestedAdapterType, rawEffectiveAdapterConfig);
+      }
       if (
         changingAdapterType ||
         (requestedAdapterType === "paperclip_runner" &&

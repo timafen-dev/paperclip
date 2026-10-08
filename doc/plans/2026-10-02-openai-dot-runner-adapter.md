@@ -2,7 +2,7 @@
 
 Date: 2026-10-02
 
-Status: Experimental self-hosted adapter implemented; real-account acceptance and extended context projection remain unqualified
+Status: Experimental self-hosted adapter and full Runner extension implemented; real-account qualification and remaining limits are recorded in the dated checkpoints below
 
 Branch: `codex/dot-events-prototype`
 
@@ -18,16 +18,16 @@ connection UI. Tests exercise the real Rust Runner and ordinary task status
 finalizer, plus bridge reattachment and missing-checkpoint refusal.
 
 The current supported deployment is self-hosted with a local controller and
-stable public HTTPS. A fresh real-Dot account test of `/mcp/runner` remains
-required before qualification. The earlier account proof covers the reference
-harness's transport only. The complete fault matrix and hosted agent-broker
+stable public HTTPS. The October 7 real-account checkpoint qualifies the dedicated `/mcp/runner`
+path. The earlier account proof covered only the reference harness transport. The complete fault matrix and hosted agent-broker
 qualification below remain future qualification work.
 
-Assigned skill files and third-party MCP bindings are explicitly rejected in
-this version. Automatic approval review blocked their projection to the
-external Dot because it required explicit authorization to expose those
-additional contents. Existing Paperclip semantic tools and admitted agent
-instructions remain available. See [the adapter runbook](../openai-dot-runner.md).
+The original adapter rejected assigned skills and third-party MCP bindings.
+The user subsequently authorized their governed Runner integration. The full
+extension now reads pinned skill files and relays assigned gateway tools.
+Workspace files and sandboxed commands require an explicit per-agent opt-in.
+Automatic inbound attachment staging remains disabled pending separate scope
+approval. See [the adapter runbook](../openai-dot-runner.md).
 
 ## 1. Recommendation
 
@@ -931,3 +931,58 @@ This plan is saved in the existing isolated worktree. There is no assigned
 Paperclip issue or authenticated issue-artifact context in this Codex chat, so
 it is a repository plan rather than an uploaded issue artifact. When execution
 is assigned in Paperclip, link this plan as its plan document/work product.
+
+
+## 15. First-time onboarding checkpoint — 2026-10-07
+
+The live onboarding attempt found and fixed two authorization problems. ChatGPT’s client metadata prefers `private_key_jwt` while also publishing `none` as a supported method; Paperclip now negotiates the supported public-client method while retaining S256 PKCE. Dot’s browser blocks the temporary Cloudflare hostname even though ChatGPT’s MCP discovery service reaches it. An optional `PAPERCLIP_MCP_AUTHORIZATION_ORIGIN` separates the browser authorization ingress from the MCP resource, issuer, and token ingress. Both routes use existing operator-approved tunnels; no new hosted infrastructure was created.
+
+An operator-issued, expiring, one-use pairing capability now lets Dot approve its exact agent grant without receiving an operator password or board session. The preview validates the pending request, binding, company, current operator membership, and agent status, and displays company, agent, permitted task operations, and access duration before submission. Approval and binding consumption are atomic, and the resulting token remains restricted to the Runner resource and exact agent. The copied setup prompt uses this path and retains the user-requested plugin-creation authorization paragraph. The live attempt also exposed a plugin-name collision and uncertainty about entering the code; the prompt now handles an existing name for another URL, and both the prompt and consent page explain that code entry previews access while submitting Connect grants it.
+
+The synthetic test-drive remains separate from production. Dot created the fresh custom plugin and reached the Tailscale consent page. It entered the code, confirmed the exact company, agent, permissions, and duration in its own scope preview, and stopped before submitting Connect. The human approved the exact connection in Codex. Dot could not verify an agent relay of that approval, so Codex completed the actual consent through the existing private plugin Connect action using the direct human authorization. The registered ChatGPT callback exchanged the real OAuth token successfully. Attaching the already connected app to the Dot conversation exposed its tools; Dot verified its inbox, created and verified the mailbox event subscription, and confirmed a readiness challenge triggered from Paperclip with no manual chat wakeup. The connection is ready. The first ordinary task exposed a heartbeat descriptor omission before dispatch; admission now uses the real dedicated Dot bridge descriptor, rather than the JSON-RPC facade. Its regression test verifies the same capabilities as execution without starting a process or broker. The normal UI retry completed DOT-1 through the real Rust Runner without a manual chat wakeup. Dot accepted mailbox item 2, wrote and read back the exact-nonce document, and completed both reporting steps. The ordinary finalizer committed Done; run `9a44feeb-2779-4217-8210-092852019511` succeeded with exit code 0, no remaining work or verification caveats, and unknown provider usage/cost retained as null. The live connection and local-controller task path are qualified; stable production ingress and hosted/remote modes remain outside this acceptance.
+
+Verification: the focused OAuth/onboarding API suite passed 11 cases, the affected UI suites passed 27 cases, the relevant server/UI typechecks and token gates passed, and the workspace build passed. The earlier focused Runner/MCP suites also passed. A full `test:run` was stopped after unrelated failures and a 300-second workspace snapshot stress timeout; isolated tool-access and event-sequencing rechecks passed, but the full suite is incomplete. After the admission fix, 34 Runner/driver tests and 13 real Rust/broker integration tests passed, and full workspace typecheck and build passed again. The full repository suite is still incomplete, so this checkpoint is not a PR-ready verification claim.
+
+During deployment, macOS exhausted its PostgreSQL shared-memory IDs. One confirmed unused PostgreSQL interlock with zero attachments and an exited creator was reclaimed; no running database was stopped. Another development instance had occupied the old API port during the outage, so this test-drive and its existing public tunnels were moved to port 3109. The temporary MCP tunnel hostname consequently changed; fresh plugin onboarding must use the current runtime prompt rather than an old copied URL or expired pairing code.
+
+
+## 2026-10-07 full Runner capability extension
+
+User authorized implementation and live qualification of all six expansion areas. Delivery scope: idle request admission with normal run ownership; human assignees and person discovery; authorized cross-task tools; pinned skill reads and assigned MCP gateway relay; explicitly enabled host workspace tools and verified artifacts; truthful capability discovery; rolling lease renewal, pagination and follow-up input. Preserve provider limits for model choice, usage, cost, and unconfirmed global external stopping.
+
+Acceptance: an idle Dot creates a hello task assigned to the responsible person; an assigned Dot reads a pinned skill, uses an authorized assigned gateway tool, produces a verified downloadable file, handles follow-up input, renews its lease, and cannot continue mutations after fencing. Verify replay, company isolation, budget stops and permission denials. Do not reseed the synthetic test-drive from production.
+
+
+### Full Runner acceptance checkpoint
+
+The real Dot created **hello** assigned to the verified responsible human, read
+its pinned synthetic skill, used attributed cross-task comments and documents,
+ran a sandboxed command, incorporated a follow-up comment, renewed its lease,
+and registered a report whose downloaded bytes and SHA-256 matched the receipt.
+A missing initial fixture exposed a definite read exception without a terminal
+receipt; the operator cancelled that run and Dot acknowledged its fence. Read
+failures now settle as bounded errors. A real Rust regression proves that later
+tools and finalization still work after a missing-file error.
+
+Dot then initiated its own **DOT-4** intake through `paperclip_dot_request_turn`,
+created **hello from idle** for the human owner, verified the missing-file error,
+and wrote/read/executed/registered `idle-proof.txt`. The downloaded 20-byte file
+contains `idle-runner-verified` and matches its registered SHA-256. Both
+completion steps succeeded; the normal run exited 0 and the ordinary finalizer
+committed Done. The offer required a direct inbox check; no automation wake was
+observed for that offer. Intake responses now include an available assignment
+and instruct stable same-request polling while admission is pending.
+
+Review also found overlapping hash-based writes and missing lock entries.
+Workspace calls now serialize across the local controller's canonical workspace
+lane; a concurrent-write regression permits one commit and rejects the stale
+edit. The lockfile includes compression and the existing manifest dependencies.
+OpenAPI includes the capability-authenticated pairing preview and redemption
+routes. The expanded API catalog's comparison fixture has been synchronized.
+
+Real Rust/PostgreSQL qualification covers the configured assigned gateway with
+a synthetic service, not a live external app account. Linux command sandboxing,
+hosted/remote controllers, provider-native control and the complete future fault
+matrix remain outside this supported local-controller acceptance. Automatic
+inbound attachment staging remains disabled. Full local suite and fresh PR CI
+are tracked in PR #15414 and are not assumed green from targeted checks.

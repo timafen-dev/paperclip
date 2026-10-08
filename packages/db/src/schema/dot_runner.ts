@@ -74,7 +74,7 @@ export const dotMailboxItems = pgTable("dot_mailbox_items", {
   bindingId: uuid("binding_id").notNull().references(() => dotAgentBindings.id, { onDelete: "cascade" }),
   bindingGeneration: integer("binding_generation").notNull(),
   assignmentId: uuid("assignment_id").references(() => dotRunnerAssignments.id, { onDelete: "cascade" }),
-  kind: text("kind").$type<"assignment" | "operation_result" | "authority_revoked" | "readiness_challenge">().notNull(),
+  kind: text("kind").$type<"assignment" | "operation_result" | "authority_revoked" | "readiness_challenge" | "follow_up">().notNull(),
   sourceEventId: text("source_event_id").notNull(),
   // References only. Task content and tool results stay in authorized projections.
   references: jsonb("references").$type<Record<string, unknown>>().notNull(),

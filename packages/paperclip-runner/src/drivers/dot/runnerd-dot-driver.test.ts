@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, it, vi } from "vitest";
 import { RunnerdDotDriver, type RunnerdDotDriverOptions } from "./runnerd-dot-driver.js";
+import { describeRunnerdNativeSessionBackend } from "../../backends/codex-native-backend.js";
+import { createNativeSessionBackend } from "../../backends/native-backend-factory.js";
 import * as controlPlane from "../../control-plane/durable-prp-control-plane.js";
 import { externalOperationDigest, type ExternalProviderOperation } from "../../contracts/external-provider.js";
 import { buildNativeModelEnvelope, parseNativeExecutionInput, type NativeExecutionInputV6 } from "../../contracts/native-execution.js";
@@ -46,6 +48,33 @@ it("v6 closes Dot identity, workspace, model and credential fields", () => {
     { ...input, credentialBindings: [{ bindingId: "secret-binding", service: "openai", destination: "api.openai.com", expiresAt: null, displayName: "API" }] },
     { ...input, session: { ...input.session, lifecyclePolicy: { mode: "warm", idleTimeoutMs: 60000 } } },
   ]) expect(() => parseNativeExecutionInput(changed)).toThrow();
+});
+
+it("admits the heartbeat descriptor with the real Dot capabilities and no broker or process startup", async () => {
+  const input = execution("/synthetic/pinned-instructions");
+  const spawnSpy = vi.spyOn(controlPlane, "spawnRunner");
+  try {
+    const descriptor = await describeRunnerdNativeSessionBackend(input);
+    const backend = createNativeSessionBackend(input, {
+      dotRunnerOptions: {
+        stateDirectory: "/must-not-be-created",
+        identity: { runnerInstanceId: randomUUID(), environmentLeaseId: randomUUID(), runId: input.binding.runId,
+          normalizedSessionId: input.session.normalizedSessionId!, turnId: "turn", itemId: "item" },
+        port: {
+          dispatch: async () => { throw new Error("Descriptor must not dispatch work"); },
+          settle: async () => { throw new Error("Descriptor must not settle work"); },
+          attach: async () => { throw new Error("Descriptor must not attach a broker"); },
+        },
+      },
+    });
+    expect(descriptor).toEqual(await backend.descriptor());
+    expect(descriptor).toMatchObject({
+      kind: "runner", name: "openai_dot_mcp", version: "dot-mcp-v1",
+      capabilities: { resume: false, steering: false, interruption: false, usage: false, dynamicTools: true },
+      runtimeContextCapabilities: { instructions: "native", skills: "native", mcp: "native" },
+    });
+    expect(spawnSpy).not.toHaveBeenCalled();
+  } finally { spawnSpy.mockRestore(); }
 });
 
 it.each(["shutdown", "unexpected exit"] as const)("classifies a real Rust %s before the next command poll", async kind => {
