@@ -616,6 +616,74 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toBeNull();
   });
 
+  it("reconciles an absent recovery-action execution wait without changing another issue", async () => {
+    const f = await seed();
+    const untouchedIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: untouchedIssueId,
+      companyId: f.companyId,
+      title: "Neighbouring task",
+      status: "todo",
+      assigneeAgentId: f.agentId,
+    });
+    const staleRecoveryActionId = randomUUID();
+    await db.delete(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, f.issueId));
+    const queueId = randomUUID();
+    await db.insert(agentWakeupRequests).values({
+      id: queueId,
+      companyId: f.companyId,
+      agentId: f.agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_commented",
+      status: "deferred_issue_execution",
+      requestedByActorType: "user",
+      requestedByActorId: "board",
+      updatedAt: new Date(0),
+      payload: {
+        issueId: f.issueId,
+        commentId: f.commentId,
+        executionWait: { recoveryActionId: staleRecoveryActionId },
+        _paperclipWakeContext: {
+          issueId: f.issueId,
+          wakeReason: "issue_commented",
+          wakeCommentId: f.commentId,
+          wakeCommentIds: [f.commentId],
+        },
+      },
+    });
+
+    await heartbeatService(db).resumeExecutionWaitComments();
+
+    const [reconciled] = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, queueId));
+    expect(reconciled).toMatchObject({ status: "coalesced" });
+    expect(reconciled?.runId).toEqual(expect.any(String));
+    const [admitted] = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.companyId, f.companyId),
+        eq(heartbeatRuns.id, reconciled!.runId!),
+      ));
+    // Queue dispatch can claim the new run immediately. The recovery invariant
+    // is a live successor linked to the saved user wake, not an intermediate
+    // `queued` status that may disappear before this assertion executes.
+    expect(admitted).toMatchObject({
+      agentId: f.agentId,
+      status: expect.stringMatching(/^(queued|running|scheduled_retry)$/),
+    });
+    expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toBeNull();
+    expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0]).toMatchObject({ status: "todo" });
+    expect((await db.select().from(issues).where(eq(issues.id, untouchedIssueId)))[0]).toMatchObject({
+      status: "todo",
+      assigneeAgentId: f.agentId,
+    });
+  });
+
   it.each(["issue_commented", "retry_failed_run"])("continues a legacy Daytona run lost before adapter.invoke: %s", async reason => {
     const f = await seed();
     await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, f.agentId));
