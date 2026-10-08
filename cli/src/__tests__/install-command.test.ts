@@ -113,8 +113,9 @@ describe("managed install commands", () => {
         const checkout = args[args.indexOf("-C") + 1];
         const packages = [
           { dir: "packages/shared", name: "@paperclipai/shared", packageJson: { name: "@paperclipai/shared", version: "0.3.1" } },
+          { dir: "packages/plugins/sdk", name: "@paperclipai/plugin-sdk", packageJson: { name: "@paperclipai/plugin-sdk", version: "1.0.0" } },
           { dir: "packages/db", name: "@paperclipai/db", packageJson: { name: "@paperclipai/db", version: "0.3.1", dependencies: { "@paperclipai/shared": "workspace:*" }, bundleDependencies: ["embedded-postgres"] } },
-          { dir: "server", name: "@paperclipai/server", packageJson: { name: "@paperclipai/server", version: "0.3.1", dependencies: { "@paperclipai/db": "workspace:*" }, ...(bundledServer ? { bundleDependencies: ["acpx"], files: ["dist", "ui-dist", "skills"] } : {}) } },
+          { dir: "server", name: "@paperclipai/server", packageJson: { name: "@paperclipai/server", version: "0.3.1", dependencies: { "@paperclipai/db": "workspace:*", "@paperclipai/plugin-sdk": "workspace:*" }, ...(bundledServer ? { bundleDependencies: ["acpx"], files: ["dist", "ui-dist", "skills"] } : {}) } },
         ];
         fs.writeFileSync(path.join(checkout, "package.json"), JSON.stringify({ packageManager: "pnpm@9.15.4" }));
         fs.mkdirSync(path.join(checkout, "cli"), { recursive: true });
@@ -141,7 +142,8 @@ describe("managed install commands", () => {
         if (args.includes("pack")) {
           const destination = args[args.indexOf("--pack-destination") + 1];
           const packageDir = args[args.indexOf("--dir") + 1];
-          const packageName = packageDir === "server" ? "paperclipai-server" : "paperclipai-shared";
+          const packageName = (JSON.parse(fs.readFileSync(path.join(_options!.cwd as string, packageDir, "package.json"), "utf8")) as { name: string })
+            .name.replace("@", "").replace("/", "-");
           fs.writeFileSync(path.join(destination, `${packageName}-0.3.1.tgz`), "package");
         }
         return { stdout: "", stderr: "" };
@@ -153,6 +155,8 @@ describe("managed install commands", () => {
           ? (JSON.parse(fs.readFileSync(path.join(args[1], "package.json"), "utf8")) as { name: string }).name.replace("@", "").replace("/", "-")
           : "paperclipai";
         if (packageName === "paperclipai-server") {
+          expect((JSON.parse(fs.readFileSync(path.join(args[1], "package.json"), "utf8")) as { dependencies: Record<string, string> })
+            .dependencies["@paperclipai/plugin-sdk"]).toBe("0.3.1");
           expect(fs.readFileSync(path.join(args[1], "ui-dist", "index.html"), "utf8"))
             .toBe("<html>Built from this Git checkout</html>");
           expect(fs.readFileSync(path.join(args[1], "skills", "sample-skill", "SKILL.md"), "utf8"))
@@ -162,6 +166,22 @@ describe("managed install commands", () => {
         return { stdout: "", stderr: "" };
       }
       if (file === "npm" && args[0] === "install") { const prefix = args[args.indexOf("--prefix") + 1]; const packageRoot = path.join(prefix, "node_modules", "paperclipai"); fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true }); fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ version: "0.3.1" })); fs.writeFileSync(path.join(packageRoot, "dist", "index.js"), "#!/usr/bin/env node\n"); return { stdout: "", stderr: "" }; }
+      if (file === process.execPath && args[0]?.endsWith("release-package-map.mjs")) {
+        const checkout = _options!.cwd as string;
+        const version = args[2]!;
+        const manifest = JSON.parse(fs.readFileSync(path.join(checkout, "scripts", "release-package-manifest.json"), "utf8")) as Array<{ dir: string }>;
+        for (const { dir } of manifest) {
+          const packagePath = path.join(checkout, dir, "package.json");
+          const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8")) as { version: string; dependencies?: Record<string, string> };
+          packageJson.version = version;
+          if (packageJson.dependencies) {
+            packageJson.dependencies = Object.fromEntries(Object.entries(packageJson.dependencies)
+              .map(([name, specifier]) => [name, specifier.startsWith("workspace:") ? version : specifier]));
+          }
+          fs.writeFileSync(packagePath, JSON.stringify(packageJson));
+        }
+        return { stdout: "", stderr: "" };
+      }
       if (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")) {
         const packageJson = JSON.parse(fs.readFileSync(path.join(args[1], "package.json"), "utf8")) as { name: string; version: string };
         fs.mkdirSync(args[2], { recursive: true });
@@ -194,11 +214,11 @@ describe("managed install commands", () => {
     expect(runCommand.mock.calls.filter(([command, args]) => command === "curl" && args.includes("--output"))).toHaveLength(1);
     expect(runCommand.mock.calls.filter(([command, args]) => command === "corepack" && args[0] === "install" && args[1] === "--global" && args[2] === "pnpm@9.15.4")).toHaveLength(1);
     expect(runCommand.mock.calls.filter(([command, args]) => command === "corepack" && args[1] === "install")).toHaveLength(1);
-    expect(runCommand.mock.calls.filter(([command, args]) => command === "corepack" && args.includes("pack"))).toHaveLength(2);
+    expect(runCommand.mock.calls.filter(([command, args]) => command === "corepack" && args.includes("pack"))).toHaveLength(3);
     expect(runCommand.mock.calls.filter(([command, args]) => command === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs"))).toHaveLength(1);
     expect(runCommand.mock.calls.filter(([command, args]) => command === "npm" && args[0] === "pack")).toHaveLength(2);
     const installCall = runCommand.mock.calls.find(([command, args]) => command === "npm" && args[0] === "install");
-    expect(installCall?.[1].filter((arg) => arg.endsWith(".tgz"))).toHaveLength(4);
+    expect(installCall?.[1].filter((arg) => arg.endsWith(".tgz"))).toHaveLength(5);
   });
 
   it("builds bundled Git server UI from its checkout before staging the declared files", async () => {
@@ -260,7 +280,7 @@ describe("managed install commands", () => {
       file === "corepack" ||
       (file === "npm" && args[0] === "pack") ||
       (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")));
-    expect(buildCalls).toHaveLength(11);
+    expect(buildCalls).toHaveLength(12);
     for (const call of buildCalls) {
       const env = call[2]?.env;
       expect(env, `${call[0]} ${call[1].join(" ")} must run with an explicit env`).toBeDefined();

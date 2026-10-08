@@ -289,6 +289,11 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     // selection so those scripts use the checkout's pnpm instead of latest.
     await runCommand("corepack", ["install", "--global", rootMetadata.packageManager], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 });
     await runCommand("corepack", ["pnpm", "install", "--frozen-lockfile"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
+    const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
+    // Source checkouts can contain independently versioned workspace packages.
+    // A release unifies those versions and workspace dependency specs before
+    // packing; reproduce that step so local tarballs resolve one another.
+    await runCommand(process.execPath, [path.join(checkoutPath, "scripts", "release-package-map.mjs"), "set-version", metadata.version], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 });
     await runCommand("bash", ["scripts/build-npm.sh", "--skip-checks", "--skip-typecheck"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand("corepack", ["pnpm", "-r", "--filter", "@paperclipai/server...", "--if-present", "run", "build"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     // Git installs bypass the release script, so materialize the generated
@@ -299,7 +304,6 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
       fs.cpSync(path.join(checkoutPath, "skills"), skillsPath, { recursive: true });
     }
     await runCommand("corepack", ["pnpm", "--dir", "server", "prepare:ui-dist"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
-    const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
     const workspacePackages = resolveGitInstallWorkspacePackages(checkoutPath);
     for (const [index, workspacePackage] of workspacePackages.entries()) {
       const packageDir = path.join(checkoutPath, workspacePackage.dir);
