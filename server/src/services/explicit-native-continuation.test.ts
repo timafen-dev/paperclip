@@ -660,12 +660,22 @@ const support = await getEmbeddedPostgresTestSupport();
       .select()
       .from(agentWakeupRequests)
       .where(eq(agentWakeupRequests.id, queueId));
-    const queued = await db
+    expect(reconciled).toMatchObject({ status: "coalesced" });
+    expect(reconciled?.runId).toEqual(expect.any(String));
+    const [admitted] = await db
       .select()
       .from(heartbeatRuns)
-      .where(and(eq(heartbeatRuns.companyId, f.companyId), eq(heartbeatRuns.status, "queued")));
-    expect(reconciled).toMatchObject({ status: "coalesced", runId: queued[0]?.id });
-    expect(queued).toHaveLength(1);
+      .where(and(
+        eq(heartbeatRuns.companyId, f.companyId),
+        eq(heartbeatRuns.id, reconciled!.runId!),
+      ));
+    // Queue dispatch can claim the new run immediately. The recovery invariant
+    // is a live successor linked to the saved user wake, not an intermediate
+    // `queued` status that may disappear before this assertion executes.
+    expect(admitted).toMatchObject({
+      agentId: f.agentId,
+      status: expect.stringMatching(/^(queued|running|scheduled_retry)$/),
+    });
     expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toBeNull();
     expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0]).toMatchObject({ status: "todo" });
     expect((await db.select().from(issues).where(eq(issues.id, untouchedIssueId)))[0]).toMatchObject({
