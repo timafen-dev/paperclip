@@ -734,6 +734,48 @@ describe("agent instructions bundle routes", () => {
     );
   });
 
+  it("preserves the complete environment map when a PATCH adds one scoped binding", async () => {
+    mockAgentService.getById.mockResolvedValue({
+      ...makeAgent(),
+      adapterType: "codex_local",
+      adapterConfig: {
+        env: {
+          CODEX_HOME: "/paperclip/companies/company-1/agents/agent-1/codex-home",
+        },
+      },
+    });
+
+    const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
+      .patch("/api/agents/11111111-1111-4111-8111-111111111111?companyId=company-1")
+      .send({
+        adapterConfig: {
+          env: {
+            TEMPORARY_USER_SECRET: {
+              type: "user_secret_ref",
+              key: "TEMPORARY_USER_SECRET",
+            },
+          },
+        },
+      }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      expect.objectContaining({
+        adapterConfig: expect.objectContaining({
+          env: {
+            CODEX_HOME: "/paperclip/companies/company-1/agents/agent-1/codex-home",
+            TEMPORARY_USER_SECRET: {
+              type: "user_secret_ref",
+              key: "TEMPORARY_USER_SECRET",
+            },
+          },
+        }),
+      }),
+      expect.any(Object),
+    );
+  });
+
   it("replaces adapter config when replaceAdapterConfig is true", async () => {
     mockAgentService.getById.mockResolvedValue({
       ...makeAgent(),
