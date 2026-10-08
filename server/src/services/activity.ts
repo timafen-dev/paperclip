@@ -11,6 +11,7 @@ import {
   heartbeatRuns,
   issueComments,
   issueDocuments,
+  issueRecoveryActions,
   issues,
   issueWorkProducts,
   workspaceOperations,
@@ -424,6 +425,29 @@ export function activityService(db: Db) {
             eq(heartbeatRuns.companyId, companyId),
             or(
               sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
+              sql`exists (
+                select 1
+                from ${issues}
+                where ${issues.companyId} = ${companyId}
+                  and ${issues.id} = ${issueId}
+                  and ${issues.executionRunId} = ${heartbeatRuns.id}
+              )`,
+              // The lock is cleared before the board-owned reconciliation
+              // action is recorded. Keep that terminal dispatch evidence in
+              // the issue ledger even when the old legacy controller never
+              // persisted contextSnapshot.issueId.
+              sql`exists (
+                select 1
+                from ${issueRecoveryActions}
+                where ${issueRecoveryActions.companyId} = ${companyId}
+                  and ${issueRecoveryActions.sourceIssueId} = ${issueId}
+                  and (
+                    ${issueRecoveryActions.evidence} ->> 'latestRunId' = ${heartbeatRuns.id}::text
+                    or ${issueRecoveryActions.evidence} ->> 'runId' = ${heartbeatRuns.id}::text
+                    or ${issueRecoveryActions.evidence} ->> 'sourceRunId' = ${heartbeatRuns.id}::text
+                    or ${issueRecoveryActions.evidence} -> 'executionReconciliation' ->> 'runId' = ${heartbeatRuns.id}::text
+                  )
+              )`,
               sql`exists (
                 select 1
                 from ${activityLog}
