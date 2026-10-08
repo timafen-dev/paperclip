@@ -1633,7 +1633,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
   });
 
-  it("accepts new verified evidence after an automatic no-replay disposition without reopening on duplicate requests", async () => {
+  it("accepts new verified evidence after an automatic no-replay disposition and reads back an identical no-ID retry", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     const runId = randomUUID();
     await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
@@ -1662,6 +1662,27 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const [recorded] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
     expect(recorded!.evidence).not.toHaveProperty("automaticRecovery");
     expect(recorded!.evidence).toMatchObject({ executionReconciliation: { runId }, continuationDelivery: "pending" });
+    const noIdReplay = await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ ...body, actionId: undefined })
+      .expect(200);
+    expect(noIdReplay.body).toMatchObject({
+      issue: { id: sourceIssueId, status: "todo", assigneeAgentId: coderId },
+      recoveryAction: { id: action!.id, status: "resolved", outcome: "restored" },
+    });
+    expect(noIdReplay.body).not.toHaveProperty("replayed");
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
+    await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        ...body,
+        actionId: undefined,
+        executionReconciliation: {
+          ...body.executionReconciliation,
+          outcomeEvidence: "A changed receipt must not be treated as the previously reconciled execution.",
+        },
+      })
+      .expect(404);
     await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
   });

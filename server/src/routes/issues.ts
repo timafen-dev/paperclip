@@ -3149,6 +3149,25 @@ function stableJson(value: unknown): string {
     .join(",")}}`;
 }
 
+function matchesExecutionReconciliationReceipt(
+  recorded: unknown,
+  requested: {
+    runId: string;
+    providerStopped: true;
+    actionOutcome: "completed" | "not_performed" | "mixed";
+    outcomeEvidence: string;
+  },
+): boolean {
+  if (!recorded || typeof recorded !== "object") return false;
+  const receipt = recorded as Partial<typeof requested>;
+  return (
+    receipt.runId === requested.runId &&
+    receipt.providerStopped === requested.providerStopped &&
+    receipt.actionOutcome === requested.actionOutcome &&
+    receipt.outcomeEvidence === requested.outcomeEvidence
+  );
+}
+
 function normalizeIssueListCacheValue(value: unknown): unknown {
   if (value === undefined) return undefined;
   if (value === null) return null;
@@ -9239,6 +9258,26 @@ export function issueRoutes(
               .where(eq(issueRecoveryActions.id, settled.id))
               .returning();
             activeRecoveryAction = issueRecoveryActionReadModel(reopened!);
+          } else if (
+            settled &&
+            settled.status === "resolved" &&
+            settled.outcome === "restored" &&
+            lockedIssue.status === "todo" &&
+            lockedIssue.assigneeAgentId === settled.returnOwnerAgentId &&
+            matchesExecutionReconciliationReceipt(
+              settled.evidence.executionReconciliation,
+              executionReconciliation,
+            )
+          ) {
+            // A caller can lose the first response after the action has been
+            // settled and removed from the active projection. Return the exact
+            // same issue-scoped receipt without reopening, revalidating, or
+            // scheduling another continuation.
+            return {
+              issue: lockedIssue,
+              recoveryAction: settled,
+              replayed: true,
+            };
           }
         }
         if (
