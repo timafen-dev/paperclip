@@ -8,7 +8,10 @@ import { queuedInteractionId, readQueuedInteractionResponse, hasQueuedInteractio
 import { deliverConversationComments, isConversation } from "../services/agent-conversations.js";
 import { issueRecoveryActionReadModel } from "../services/issue-recovery-actions.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
-import { requiresExecutionReconciliation } from "@paperclipai/shared";
+import {
+  EXECUTION_RECONCILIATION_CAUSES,
+  requiresExecutionReconciliation,
+} from "@paperclipai/shared";
 import {
   validateExecutionReconciliation,
   markExecutionReconciliation,
@@ -3154,6 +3157,25 @@ function stableJson(value: unknown): string {
     .filter((key) => record[key] !== undefined)
     .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
     .join(",")}}`;
+}
+
+function matchesExecutionReconciliationReceipt(
+  recorded: unknown,
+  requested: {
+    runId: string;
+    providerStopped: true;
+    actionOutcome: "completed" | "not_performed" | "mixed";
+    outcomeEvidence: string;
+  },
+): boolean {
+  if (!recorded || typeof recorded !== "object") return false;
+  const receipt = recorded as Partial<typeof requested>;
+  return (
+    receipt.runId === requested.runId &&
+    receipt.providerStopped === requested.providerStopped &&
+    receipt.actionOutcome === requested.actionOutcome &&
+    receipt.outcomeEvidence === requested.outcomeEvidence
+  );
 }
 
 function normalizeIssueListCacheValue(value: unknown): unknown {
@@ -9086,6 +9108,93 @@ export function issueRoutes(
           tx,
         );
         if (
+          !actionId &&
+          activeRecoveryAction &&
+          executionReconciliation &&
+          outcome === "restored" &&
+          sourceIssueStatus === "todo"
+        ) {
+          // The no-ID form is deliberately limited to an eligible settled
+          // automatic disposition (or its idempotent readback). A currently
+          // active action must be addressed explicitly, so an old receipt
+          // cannot resolve or inspect live recovery work.
+          throw notFound("Active recovery action not found");
+        }
+        if (
+          !actionId &&
+          !activeRecoveryAction &&
+          executionReconciliation &&
+          outcome === "restored" &&
+          sourceIssueStatus === "todo"
+        ) {
+          // Automatic no-replay dispositions are intentionally absent from the
+          // active-action projection. The documented, issue-scoped repair must
+          // therefore be able to locate its one eligible settled action without
+          // exposing or requiring an internal recovery-action id.
+          const [settled] = await tx
+            .select()
+            .from(issueRecoveryActions)
+            .where(
+              and(
+                eq(issueRecoveryActions.companyId, lockedIssue.companyId),
+                eq(issueRecoveryActions.sourceIssueId, lockedIssue.id),
+                inArray(issueRecoveryActions.status, ["resolved", "cancelled"]),
+                inArray(
+                  issueRecoveryActions.cause,
+                  EXECUTION_RECONCILIATION_CAUSES,
+                ),
+              ),
+            )
+            .orderBy(desc(issueRecoveryActions.updatedAt))
+            .limit(1);
+          const automatic = settled?.evidence.automaticRecovery as
+            | { replay?: string }
+            | undefined;
+          if (settled && automatic?.replay === "blocked") {
+            await requireRecoveryActionAuthority(
+              req,
+              lockedIssue,
+              issueRecoveryActionReadModel(settled),
+              { source: "recovery_action_resolution" },
+            );
+            assertBoard(req);
+            const [reopened] = await tx
+              .update(issueRecoveryActions)
+              .set({ status: "active", outcome: null, resolvedAt: null })
+              .where(eq(issueRecoveryActions.id, settled.id))
+              .returning();
+            activeRecoveryAction = issueRecoveryActionReadModel(reopened!);
+          } else if (
+            settled &&
+            settled.status === "resolved" &&
+            // A successful safe return to the prior owner is recorded as
+            // "handed_back". It is still the same settled reconciliation
+            // receipt as an explicit "restored" outcome, so a lost response
+            // can be read back without treating it as live recovery work.
+            (settled.outcome === "restored" ||
+              settled.outcome === "handed_back") &&
+            lockedIssue.status === "todo" &&
+            lockedIssue.assigneeAgentId === settled.returnOwnerAgentId &&
+            matchesExecutionReconciliationReceipt(
+              settled.evidence.executionReconciliation,
+              executionReconciliation,
+            )
+          ) {
+            // Reconciliation is a board-operated recovery decision even when
+            // this branch is only returning a previously recorded receipt.
+            assertBoard(req);
+            // A caller can lose the first response after the action has been
+            // settled and removed from the active projection. Return the exact
+            // same issue-scoped receipt without reopening, revalidating, or
+            // scheduling another continuation.
+            return {
+              issue: lockedIssue,
+              recoveryAction: settled,
+              replayed: true,
+            };
+          }
+        }
+        if (
           actionId &&
           (!activeRecoveryAction || activeRecoveryAction.id !== actionId)
         ) {
@@ -9129,6 +9238,7 @@ export function issueRoutes(
                 .returning();
               activeRecoveryAction = issueRecoveryActionReadModel(reopened!);
             } else {
+              if (executionReconciliation) assertBoard(req);
               return {
                 issue: lockedIssue,
                 recoveryAction: settled,
