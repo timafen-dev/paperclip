@@ -5282,7 +5282,7 @@ export function agentRoutes(
       let rawEffectiveAdapterConfig = requestedAdapterConfig
         ? restoreRedactedAgentEnv(requestedAdapterConfig, existingAdapterConfig)
         : changingAdapterType ? {} : existingAdapterConfig;
-      if (requestedAdapterConfig && !changingAdapterType && !replaceAdapterConfig) {
+      if (requestedAdapterConfig && !replaceAdapterConfig) {
         rawEffectiveAdapterConfig = mergeAdapterConfigPatch(existingAdapterConfig, rawEffectiveAdapterConfig);
       }
       if (changingAdapterType) {
