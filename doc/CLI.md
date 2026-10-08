@@ -469,6 +469,8 @@ readback without reopening the action or scheduling another continuation. The
 retry must keep all four reconciliation fields identical (`runId`,
 `providerStopped`, `actionOutcome`, and `outcomeEvidence`); a different receipt,
 changed owner, non-`todo` issue, or live recovery action returns HTTP 404. The
+no-`actionId` form is only for an eligible settled action and its board-only
+readback; a live action must be resolved with its explicit `actionId`.
 initial restore is refused with HTTP 409 for a live provider, coordinator,
 environment lease, owner change, or run mismatch. An identical readback does
 not repeat those checks because it makes no mutation. This is an issue-scoped

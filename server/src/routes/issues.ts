@@ -9216,6 +9216,19 @@ export function issueRoutes(
         );
         if (
           !actionId &&
+          activeRecoveryAction &&
+          executionReconciliation &&
+          outcome === "restored" &&
+          sourceIssueStatus === "todo"
+        ) {
+          // The no-ID form is deliberately limited to an eligible settled
+          // automatic disposition (or its idempotent readback). A currently
+          // active action must be addressed explicitly, so an old receipt
+          // cannot resolve or inspect live recovery work.
+          throw notFound("Active recovery action not found");
+        }
+        if (
+          !actionId &&
           !activeRecoveryAction &&
           executionReconciliation &&
           outcome === "restored" &&
@@ -9269,6 +9282,9 @@ export function issueRoutes(
               executionReconciliation,
             )
           ) {
+            // Reconciliation is a board-operated recovery decision even when
+            // this branch is only returning a previously recorded receipt.
+            assertBoard(req);
             // A caller can lose the first response after the action has been
             // settled and removed from the active projection. Return the exact
             // same issue-scoped receipt without reopening, revalidating, or
@@ -9324,6 +9340,7 @@ export function issueRoutes(
                 .returning();
               activeRecoveryAction = issueRecoveryActionReadModel(reopened!);
             } else {
+              if (executionReconciliation) assertBoard(req);
               return {
                 issue: lockedIssue,
                 recoveryAction: settled,

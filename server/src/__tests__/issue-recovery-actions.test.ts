@@ -1672,6 +1672,29 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
     expect(noIdReplay.body).not.toHaveProperty("replayed");
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
+    const agentRunId = randomUUID();
+    await seedHeartbeatRun({
+      companyId,
+      agentId: coderId,
+      runId: agentRunId,
+      issueId: sourceIssueId,
+    });
+    const agentReplay = await request(createApp({
+      type: "agent",
+      agentId: coderId,
+      companyId,
+      runId: agentRunId,
+      source: "agent_jwt",
+    }))
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ ...body, actionId: undefined })
+      .expect(403);
+    expect(agentReplay.body.error).toBe("Board access required");
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toMatchObject({
+      status: "todo",
+      assigneeAgentId: coderId,
+    });
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
     await request(app)
       .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
       .send({
@@ -1685,6 +1708,55 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .expect(404);
     await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
+  });
+
+  it("returns 404 for no-ID reconciliation while a recovery action is live", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({
+      companyId,
+      agentId: coderId,
+      runId,
+      issueId: sourceIssueId,
+      status: "failed",
+    });
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    const [action] = await db.insert(issueRecoveryActions).values({
+      companyId,
+      sourceIssueId,
+      kind: "active_run_watchdog",
+      status: "active",
+      ownerType: "board",
+      returnOwnerAgentId: coderId,
+      cause: "legacy_execution_requires_reconciliation",
+      fingerprint: runId,
+      nextAction: "Reconcile the live recovery action by its action ID.",
+      evidence: { runId },
+    }).returning();
+
+    await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        executionReconciliation: {
+          runId,
+          providerStopped: true,
+          actionOutcome: "not_performed",
+          outcomeEvidence: "The receipt belongs to a settled action, not this live recovery action.",
+        },
+      })
+      .expect(404);
+
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toMatchObject({
+      status: "blocked",
+      assigneeAgentId: coderId,
+    });
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toMatchObject({
+      status: "active",
+      outcome: null,
+      resolvedAt: null,
+    });
   });
 
   async function seedReconciledDelivery() {
