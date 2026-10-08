@@ -2507,6 +2507,23 @@ export function agentRoutes(
     return record?.type === "secret_ref" && typeof record.secretId === "string";
   }
 
+  function mergeAdapterConfigPatch(
+    existingAdapterConfig: Record<string, unknown>,
+    requestedAdapterConfig: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const existingEnv = asRecord(existingAdapterConfig.env);
+    const requestedEnv = asRecord(requestedAdapterConfig.env);
+    return {
+      ...existingAdapterConfig,
+      ...requestedAdapterConfig,
+      // `adapterConfig` is a partial PATCH by default. Its env map is also
+      // partial: a scoped binding must not replace unrelated entries such as
+      // CODEX_HOME. Callers that need to replace the complete map opt into
+      // replaceAdapterConfig, which deliberately bypasses this merge.
+      ...(existingEnv && requestedEnv ? { env: { ...existingEnv, ...requestedEnv } } : {}),
+    };
+  }
+
   // codex_local agents inherit whatever Codex login is already on the device
   // (the host's ~/.codex or $CODEX_HOME) by default, so a fresh agent needs no
   // env overrides at all. We only carve out an isolated per-agent CODEX_HOME
@@ -5266,7 +5283,7 @@ export function agentRoutes(
         ? restoreRedactedAgentEnv(requestedAdapterConfig, existingAdapterConfig)
         : changingAdapterType ? {} : existingAdapterConfig;
       if (requestedAdapterConfig && !changingAdapterType && !replaceAdapterConfig) {
-        rawEffectiveAdapterConfig = { ...existingAdapterConfig, ...rawEffectiveAdapterConfig };
+        rawEffectiveAdapterConfig = mergeAdapterConfigPatch(existingAdapterConfig, rawEffectiveAdapterConfig);
       }
       if (changingAdapterType) {
         // Preserve adapter-agnostic keys (env, cwd, etc.) from the existing config
@@ -5274,6 +5291,20 @@ export function agentRoutes(
         // adapterConfig but omits these keys would silently drop them.
         for (const key of ADAPTER_AGNOSTIC_KEYS) {
           if (KNOWN_INSTRUCTIONS_BUNDLE_KEY_SET.has(key)) continue;
+          if (key === "env" && !replaceAdapterConfig) {
+            const existingEnv = asRecord(existingAdapterConfig.env);
+            const requestedEnv = asRecord(rawEffectiveAdapterConfig.env);
+            // An explicitly empty env map is a request to clear inherited
+            // bindings during the transition. Only merge a scoped update that
+            // names at least one binding.
+            if (existingEnv && requestedEnv && Object.keys(requestedEnv).length > 0) {
+              rawEffectiveAdapterConfig = {
+                ...rawEffectiveAdapterConfig,
+                env: { ...existingEnv, ...requestedEnv },
+              };
+              continue;
+            }
+          }
           if (rawEffectiveAdapterConfig[key] === undefined && existingAdapterConfig[key] !== undefined) {
             rawEffectiveAdapterConfig = { ...rawEffectiveAdapterConfig, [key]: existingAdapterConfig[key] };
           }
