@@ -19214,23 +19214,6 @@ export function heartbeatService(
       });
       if (!finalizedRun) finalizedRun = await getRun(run.id);
       if (!finalizedRun) continue;
-      // The normal terminal transition can complete after a legacy controller
-      // has lost contextSnapshot.issueId. Reconcile that exact lock before the
-      // release drain clears it, preserving a durable terminal classification
-      // without inferring ownership from any other run or agent.
-      if (
-        finalizedRun.runtimeMode === "legacy" &&
-        !readNonEmptyString(parseObject(finalizedRun.contextSnapshot).issueId) &&
-        finalizedRun.errorCode === "process_lost"
-      ) {
-        finalizedRun =
-          (await terminalizeLegacyExecution({
-            db,
-            run: finalizedRun,
-            status: finalizedRun.status,
-            fromStatuses: [finalizedRun.status],
-          })) ?? finalizedRun;
-      }
       finalizedRun =
         (await classifyAndPersistRunLiveness(
           finalizedRun,
@@ -19264,6 +19247,24 @@ export function heartbeatService(
       }
 
       if (!retriedRun) {
+        // The normal terminal transition can complete after a legacy controller
+        // has lost contextSnapshot.issueId. Reconcile that exact lock only once
+        // no replacement run is scheduled, before the release drain clears it.
+        // A retry remains the authoritative recovery path and must not coexist
+        // with a terminal board-facing recovery action.
+        if (
+          finalizedRun.runtimeMode === "legacy" &&
+          !readNonEmptyString(parseObject(finalizedRun.contextSnapshot).issueId) &&
+          finalizedRun.errorCode === "process_lost"
+        ) {
+          finalizedRun =
+            (await terminalizeLegacyExecution({
+              db,
+              run: finalizedRun,
+              status: finalizedRun.status,
+              fromStatuses: [finalizedRun.status],
+            })) ?? finalizedRun;
+        }
         await releaseIssueExecutionAndPromote(finalizedRun);
       }
 

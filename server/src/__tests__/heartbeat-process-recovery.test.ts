@@ -2526,6 +2526,38 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     ]);
   });
 
+  it("does not terminalize a lost legacy controller while its first process-loss retry is scheduled", async () => {
+    const { companyId, agentId, issueId, runId } = await seedRunFixture({
+      agentStatus: "idle",
+      processPid: 999_999_999,
+      processLossRetryCount: 0,
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({ contextSnapshot: {} })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const result = await heartbeatService(db).reapOrphanedRuns();
+
+    expect(result).toEqual({ reaped: 1, runIds: [runId] });
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs.filter((row) => row.retryOfRunId === runId)).toHaveLength(1);
+    await expect(
+      db
+        .select()
+        .from(issueRecoveryActions)
+        .where(
+          and(
+            eq(issueRecoveryActions.companyId, companyId),
+            eq(issueRecoveryActions.sourceIssueId, issueId),
+          ),
+        ),
+    ).resolves.toEqual([]);
+  });
+
   it("refuses to reconcile a lock-owned legacy run while its controller lease is live", async () => {
     const { companyId, agentId, issueId, runId } = await seedRunFixture({
       agentStatus: "idle",
