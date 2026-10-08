@@ -10423,10 +10423,7 @@ export function heartbeatService(
         sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
         eq(issues.assigneeAgentId, agentWakeupRequests.agentId)))
       .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
-      .where(and(exists(db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
-        eq(issueRecoveryActions.companyId, issues.companyId), eq(issueRecoveryActions.sourceIssueId, issues.id),
-        executionBlockerPredicate(),
-      ))), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
         eq(agentWakeupRequests.requestedByActorType, "user"),
         sql`${agentWakeupRequests.payload}->'executionWait' is not null`,
         sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is null`,
@@ -10449,6 +10446,37 @@ export function heartbeatService(
       // Match normal admission's deterministic current blocker selection. An
       // arbitrary historical action must not choose the retry's source run.
       const blocker = await getExecutionBlocker(db, wake.companyId, issueId);
+      const staleRecoveryActionId = readNonEmptyString(
+        parseObject(parseObject(wake.payload).executionWait).recoveryActionId,
+      );
+      if (!blocker && staleRecoveryActionId && isUuidLike(staleRecoveryActionId)) {
+        // A bounded wake can be deferred while a recovery action exists, then
+        // observe that action removed before the next periodic pass. Do not
+        // leave that one issue's saved user input permanently unschedulable:
+        // prove the referenced action is absent in this company and re-enter
+        // normal admission. This never clears another issue's hold or resets
+        // an agent-wide execution state.
+        const [referencedAction] = await db
+          .select({ id: issueRecoveryActions.id })
+          .from(issueRecoveryActions)
+          .where(
+            and(
+              eq(issueRecoveryActions.companyId, wake.companyId),
+              eq(issueRecoveryActions.sourceIssueId, issueId),
+              eq(issueRecoveryActions.id, staleRecoveryActionId),
+            ),
+          )
+          .limit(1);
+        if (!referencedAction) {
+          await resumeSavedLegacyComments(wake.companyId, wake.id).catch((err) => {
+            logger.warn(
+              { err, wakeId: wake.id, issueId, recoveryActionId: staleRecoveryActionId },
+              "failed to reconcile stale execution-wait recovery action",
+            );
+          });
+          continue;
+        }
+      }
       const sourceId = blocker?.runId;
       if (!sourceId || !isUuidLike(sourceId)) continue;
       const run = await getRun(sourceId);
