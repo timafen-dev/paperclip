@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
 import { issueService } from "../services/issues.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
+import { activityService } from "../services/activity.js";
 import { adapterExecutionControls, createAdapterExecutionControl } from "../services/adapter-execution-control.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
@@ -2468,6 +2469,98 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     );
     // Terminal run cleanup releases the checkout lock so future checkout 409s only mean a live owner exists.
     expect(checkoutReleasedIssue?.checkoutRunId).toBeNull();
+  });
+
+  it("terminalizes a lost legacy controller through its issue lock when context attribution is absent", async () => {
+    const { companyId, agentId, issueId, runId } = await seedRunFixture({
+      agentStatus: "idle",
+      processPid: 999_999_999,
+      processLossRetryCount: 1,
+    });
+    // Model the historical state exactly: the issue still owns the run, but
+    // the legacy controller lost its context/session record before dispatch
+    // could write a terminal outcome.
+    await db
+      .update(heartbeatRuns)
+      .set({ contextSnapshot: {} })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const result = await heartbeatService(db).reapOrphanedRuns();
+
+    expect(result).toEqual({ reaped: 1, runIds: [runId] });
+    expect(await heartbeatService(db).getRun(runId)).toMatchObject({
+      status: "failed",
+      errorCode: "process_lost",
+    });
+    await expect(
+      db
+        .select({ executionRunId: issues.executionRunId, checkoutRunId: issues.checkoutRunId })
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId))),
+    ).resolves.toEqual([{ executionRunId: null, checkoutRunId: null }]);
+    await expect(
+      db
+        .select({ evidence: issueRecoveryActions.evidence })
+        .from(issueRecoveryActions)
+        .where(
+          and(
+            eq(issueRecoveryActions.companyId, companyId),
+            eq(issueRecoveryActions.sourceIssueId, issueId),
+          ),
+        ),
+    ).resolves.toEqual([expect.objectContaining({ evidence: expect.objectContaining({ runId }) })]);
+    const [runtime, sessions, history] = await Promise.all([
+      heartbeatService(db).getRuntimeState(agentId),
+      heartbeatService(db).listTaskSessions(agentId),
+      activityService(db).runsForIssue(companyId, issueId),
+    ]);
+    expect(runtime).toMatchObject({ sessionId: null, lastRunId: null });
+    expect(sessions).toEqual([]);
+    expect(history).toEqual([
+      expect.objectContaining({
+        runId,
+        status: "failed",
+        errorCode: "process_lost",
+        contextIssueId: null,
+      }),
+    ]);
+  });
+
+  it("refuses to reconcile a lock-owned legacy run while its controller lease is live", async () => {
+    const { companyId, agentId, issueId, runId } = await seedRunFixture({
+      agentStatus: "idle",
+      processPid: 999_999_999,
+    });
+    const leaseExpiry = new Date(Date.now() + 60_000);
+    await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: {},
+        controllerBootId: randomUUID(),
+        controllerLeaseExpiresAt: leaseExpiry,
+      })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const heartbeat = heartbeatService(db);
+    const [runtime, sessions, history, result] = await Promise.all([
+      heartbeat.getRuntimeState(agentId),
+      heartbeat.listTaskSessions(agentId),
+      activityService(db).runsForIssue(companyId, issueId),
+      heartbeat.reapOrphanedRuns(),
+    ]);
+
+    expect(runtime).toMatchObject({ sessionId: null, lastRunId: null });
+    expect(sessions).toEqual([]);
+    expect(history).toEqual([
+      expect.objectContaining({ runId, status: "running", contextIssueId: null }),
+    ]);
+    expect(result).toEqual({ reaped: 0, runIds: [] });
+    await expect(
+      db
+        .select({ executionRunId: issues.executionRunId, checkoutRunId: issues.checkoutRunId })
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId))),
+    ).resolves.toEqual([{ executionRunId: runId, checkoutRunId: runId }]);
   });
 
   it("requires reconciliation for a lost monitor whose provider outcomes are unknown", async () => {

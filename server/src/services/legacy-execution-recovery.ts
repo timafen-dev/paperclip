@@ -66,15 +66,21 @@ export async function terminalizeLegacyExecution(input: {
     await tx.execute(
       sql`select set_config('statement_timeout', '15000', true), set_config('lock_timeout', '1000', true)`,
     );
-    const [task] = issueId
-      ? await tx
-          .select()
-          .from(issues)
-          .where(
-            and(eq(issues.companyId, run.companyId), eq(issues.id, issueId)),
-          )
-          .for("update")
-      : [];
+    // Older legacy controllers can lose contextSnapshot.issueId before they
+    // persist a terminal result. In that case, only the exact issue lock is
+    // authoritative; never infer ownership from the agent or a broader scan.
+    const [task] = await tx
+      .select()
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, run.companyId),
+          issueId
+            ? eq(issues.id, issueId)
+            : eq(issues.executionRunId, run.id),
+        ),
+      )
+      .for("update");
     const [updated] = await tx
       .update(heartbeatRuns)
       .set({
