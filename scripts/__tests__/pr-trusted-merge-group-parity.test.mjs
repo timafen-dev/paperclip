@@ -69,8 +69,7 @@ test("separate callers preserve ci aggregate check names and event-specific rout
   assert.match(pullRequestCaller, /on:\n  pull_request:\n/);
   assert.doesNotMatch(pullRequestCaller, /merge_group:/);
   assert.deepEqual(callerJobIds(pullRequestCaller), ["ci"]);
-  assert.match(pullRequestCaller, new RegExp(`ci:\\n[\\s\\S]*?uses: paperclipai/paperclip/\\.github/workflows/pr-trusted\\.yml@${upstreamMasterCommit}`));
-  assert.doesNotMatch(pullRequestCaller, /pr-trusted\.yml@master/);
+  assert.match(pullRequestCaller, /ci:\n[\s\S]*?uses: paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml@master/);
   assert.doesNotMatch(pullRequestCaller, /uses: \.\/\.github\/workflows\/pr-trusted\.yml/);
 
   assert.match(mergeGroupCaller, /on:\n  merge_group:\n/);

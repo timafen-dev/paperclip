@@ -11,5 +11,5 @@ permissions:
 jobs:
   ci:
     # Master requires CODEOWNERS review for .github/**, including this workflow.
-    # Pin to the reviewed upstream snapshot so active CI cannot drift.
-    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@0ac194450a48a407450921a16c3ef8684dcb85ca
+    # The AWS runner group permits pr-trusted.yml@refs/heads/master.
+    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@master
