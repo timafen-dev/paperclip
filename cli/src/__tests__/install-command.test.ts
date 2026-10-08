@@ -221,8 +221,12 @@ describe("managed install commands", () => {
       command === process.execPath && args[0]?.endsWith("release-package-map.mjs"));
     const dependencyInstallCallIndex = runCommand.mock.calls.findIndex(([command, args]) =>
       command === "corepack" && args[0] === "pnpm" && args[1] === "install");
+    const workspaceBuildCallIndex = runCommand.mock.calls.findIndex(([command, args]) =>
+      command === "corepack" && args[0] === "pnpm" && args.includes("@paperclipai/server..."));
     expect(versionCallIndex).toBeGreaterThan(-1);
-    expect(dependencyInstallCallIndex).toBeGreaterThan(versionCallIndex);
+    expect(dependencyInstallCallIndex).toBeGreaterThan(-1);
+    expect(workspaceBuildCallIndex).toBeGreaterThan(dependencyInstallCallIndex);
+    expect(versionCallIndex).toBeGreaterThan(workspaceBuildCallIndex);
     const installCall = runCommand.mock.calls.find(([command, args]) => command === "npm" && args[0] === "install");
     expect(installCall?.[1].filter((arg) => arg.endsWith(".tgz"))).toHaveLength(5);
   });

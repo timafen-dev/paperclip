@@ -284,12 +284,6 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     if (!rootMetadata.packageManager?.startsWith("pnpm@")) {
       throw new Error("Git install requires a root packageManager pinned to pnpm.");
     }
-    const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
-    // Source checkouts can contain independently versioned workspace packages.
-    // A release unifies those versions and workspace dependency specs before
-    // installing, so pnpm resolves every internal dependency to its workspace
-    // package rather than treating a pre-release version mismatch as external.
-    await runCommand(process.execPath, [path.join(checkoutPath, "scripts", "release-package-map.mjs"), "set-version", metadata.version], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 });
     // npm pack runs package lifecycle scripts from isolated staging directories,
     // outside the checkout that declares packageManager. Pin Corepack's global
     // selection so those scripts use the checkout's pnpm instead of latest.
@@ -297,6 +291,12 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     await runCommand("corepack", ["pnpm", "install", "--frozen-lockfile"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand("bash", ["scripts/build-npm.sh", "--skip-checks", "--skip-typecheck"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand("corepack", ["pnpm", "-r", "--filter", "@paperclipai/server...", "--if-present", "run", "build"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
+    const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
+    // Build while workspace: edges still describe the dependency graph, then
+    // reproduce the release version rewrite before packing the built packages.
+    // Rewriting earlier would both invalidate the frozen lockfile and hide
+    // workspace build dependencies from pnpm's recursive filter.
+    await runCommand(process.execPath, [path.join(checkoutPath, "scripts", "release-package-map.mjs"), "set-version", metadata.version], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 });
     // Git installs bypass the release script, so materialize the generated
     // package inputs that release.sh normally creates before packaging.
     for (const packageDir of ["server", "packages/adapters/claude-local", "packages/adapters/codex-local"]) {
