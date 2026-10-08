@@ -547,6 +547,34 @@ describe("agent live run routes", () => {
     });
   });
 
+  it("keeps a running execution-lock owner visible when legacy context lacks issue attribution", async () => {
+    mockHeartbeatService.getRunIssueSummary.mockResolvedValue({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      status: "running",
+      invocationSource: "automation",
+      triggerDetail: "system",
+      startedAt: new Date("2026-04-10T09:30:00.000Z"),
+      finishedAt: null,
+      createdAt: new Date("2026-04-10T09:29:59.000Z"),
+      agentId: "agent-1",
+      issueId: null,
+      runtimeMode: "legacy",
+    });
+
+    const res = await requestApp(await createApp(), (baseUrl) =>
+      request(baseUrl).get("/api/issues/PC1A2-1295/active-run"),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      issueId: "issue-1",
+      agentId: "agent-1",
+      runtimeMode: "legacy",
+    });
+    expect(mockHeartbeatService.getActiveRunIssueSummaryForAgent).not.toHaveBeenCalled();
+  });
+
   it("includes ephemeral current status fields on active run polling", async () => {
     mockHeartbeatService.decorateActiveRunStatus.mockImplementation((run) => ({
       ...run,
