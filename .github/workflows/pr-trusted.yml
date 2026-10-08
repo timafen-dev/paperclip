@@ -295,10 +295,13 @@ jobs:
           run_install: false
 
       - name: Validate migration ordering against target branch
+        env:
+          MIGRATION_ORDER_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          MIGRATION_ORDER_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
         run: >-
           node .github/scripts/check-pr-migration-order.mjs
-          "${{ github.event.pull_request.base.sha }}"
-          "${{ github.event.pull_request.head.sha }}"
+          "$MIGRATION_ORDER_BASE_SHA"
+          "$MIGRATION_ORDER_HEAD_SHA"
 
       - name: Validate Dockerfile deps stage
         run: node ./scripts/check-docker-deps-stage.mjs
