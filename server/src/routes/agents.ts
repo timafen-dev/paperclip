@@ -5294,7 +5294,10 @@ export function agentRoutes(
           if (key === "env" && !replaceAdapterConfig) {
             const existingEnv = asRecord(existingAdapterConfig.env);
             const requestedEnv = asRecord(rawEffectiveAdapterConfig.env);
-            if (existingEnv && requestedEnv) {
+            // An explicitly empty env map is a request to clear inherited
+            // bindings during the transition. Only merge a scoped update that
+            // names at least one binding.
+            if (existingEnv && requestedEnv && Object.keys(requestedEnv).length > 0) {
               rawEffectiveAdapterConfig = {
                 ...rawEffectiveAdapterConfig,
                 env: { ...existingEnv, ...requestedEnv },
