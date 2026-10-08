@@ -148,6 +148,7 @@ describe("managed install commands", () => {
       }
       if (file === "bash") return { stdout: "", stderr: "" };
       if (file === "npm" && args[0] === "pack") {
+        if (args[1]?.includes("workspace-package-")) expect(args).toContain("--ignore-scripts");
         const packageName = args[1]?.includes("workspace-package-")
           ? (JSON.parse(fs.readFileSync(path.join(args[1], "package.json"), "utf8")) as { name: string }).name.replace("@", "").replace("/", "-")
           : "paperclipai";
