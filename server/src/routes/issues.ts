@@ -2,7 +2,11 @@ import { queuedInteractionId, readQueuedInteractionResponse, hasQueuedInteractio
 import { deliverConversationComments, isConversation } from "../services/agent-conversations.js";
 import { issueRecoveryActionReadModel } from "../services/issue-recovery-actions.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
-import { extractIssueReferenceIdentifiers, requiresExecutionReconciliation } from "@paperclipai/shared";
+import {
+  EXECUTION_RECONCILIATION_CAUSES,
+  extractIssueReferenceIdentifiers,
+  requiresExecutionReconciliation,
+} from "@paperclipai/shared";
 import {
   validateExecutionReconciliation,
   markExecutionReconciliation,
@@ -9191,6 +9195,52 @@ export function issueRoutes(
           lockedIssue.id,
           tx,
         );
+        if (
+          !actionId &&
+          !activeRecoveryAction &&
+          executionReconciliation &&
+          outcome === "restored" &&
+          sourceIssueStatus === "todo"
+        ) {
+          // Automatic no-replay dispositions are intentionally absent from the
+          // active-action projection. The documented, issue-scoped repair must
+          // therefore be able to locate its one eligible settled action without
+          // exposing or requiring an internal recovery-action id.
+          const [settled] = await tx
+            .select()
+            .from(issueRecoveryActions)
+            .where(
+              and(
+                eq(issueRecoveryActions.companyId, lockedIssue.companyId),
+                eq(issueRecoveryActions.sourceIssueId, lockedIssue.id),
+                inArray(issueRecoveryActions.status, ["resolved", "cancelled"]),
+                inArray(
+                  issueRecoveryActions.cause,
+                  EXECUTION_RECONCILIATION_CAUSES,
+                ),
+              ),
+            )
+            .orderBy(desc(issueRecoveryActions.updatedAt))
+            .limit(1);
+          const automatic = settled?.evidence.automaticRecovery as
+            | { replay?: string }
+            | undefined;
+          if (settled && automatic?.replay === "blocked") {
+            await requireRecoveryActionAuthority(
+              req,
+              lockedIssue,
+              issueRecoveryActionReadModel(settled),
+              { source: "recovery_action_resolution" },
+            );
+            assertBoard(req);
+            const [reopened] = await tx
+              .update(issueRecoveryActions)
+              .set({ status: "active", outcome: null, resolvedAt: null })
+              .where(eq(issueRecoveryActions.id, settled.id))
+              .returning();
+            activeRecoveryAction = issueRecoveryActionReadModel(reopened!);
+          }
+        }
         if (
           actionId &&
           (!activeRecoveryAction || activeRecoveryAction.id !== actionId)

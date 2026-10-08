@@ -455,6 +455,16 @@ npx paperclipai issue recovery-actions <issue-id>
 npx paperclipai issue recovery:resolve <issue-id> --outcome restored --source-issue-status todo
 ```
 
+For a terminal legacy execution that requires reconciliation, a board operator
+uses `POST /api/issues/{issueId}/recovery-actions/resolve` with
+`outcome: "restored"`, `sourceIssueStatus: "todo"`, and
+`executionReconciliation` (`runId`, `providerStopped: true`, `actionOutcome`,
+and `outcomeEvidence`). The route rejects a live provider, coordinator,
+environment lease, changed owner, or run mismatch. When the active projection is
+empty because the automatic no-replay action is settled, the same typed request
+finds that eligible issue action without an `actionId`; it does not affect other
+issues or agent sessions.
+
 ```sh
 npx paperclipai issue documents <issue-id> [--include-system]
 npx paperclipai issue document:get <issue-id> <key>

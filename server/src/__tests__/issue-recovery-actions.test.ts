@@ -1651,7 +1651,13 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     // A retry without new evidence cannot clear the hold or reopen the task.
     await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({ ...body, executionReconciliation: undefined }).expect(200);
     expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]!.status).toBe("blocked");
-    const resolved = await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    // The automatic disposition is deliberately hidden from the active-action
+    // projection. An operator with new verified evidence must not need an
+    // internal recovery-action id to repair this one issue.
+    const resolved = await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ ...body, actionId: undefined })
+      .expect(200);
     expect(resolved.body.issue.status).toBe("todo");
     const [recorded] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
     expect(recorded!.evidence).not.toHaveProperty("automaticRecovery");
