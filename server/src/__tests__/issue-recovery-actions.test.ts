@@ -1668,7 +1668,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .expect(200);
     expect(noIdReplay.body).toMatchObject({
       issue: { id: sourceIssueId, status: "todo", assigneeAgentId: coderId },
-      recoveryAction: { id: action!.id, status: "resolved", outcome: "restored" },
+      recoveryAction: { id: action!.id, status: "resolved", outcome: "handed_back" },
     });
     expect(noIdReplay.body).not.toHaveProperty("replayed");
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);

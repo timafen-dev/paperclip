@@ -9274,7 +9274,12 @@ export function issueRoutes(
           } else if (
             settled &&
             settled.status === "resolved" &&
-            settled.outcome === "restored" &&
+            // A successful safe return to the prior owner is recorded as
+            // "handed_back". It is still the same settled reconciliation
+            // receipt as an explicit "restored" outcome, so a lost response
+            // can be read back without treating it as live recovery work.
+            (settled.outcome === "restored" ||
+              settled.outcome === "handed_back") &&
             lockedIssue.status === "todo" &&
             lockedIssue.assigneeAgentId === settled.returnOwnerAgentId &&
             matchesExecutionReconciliationReceipt(
