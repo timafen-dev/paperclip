@@ -83,8 +83,10 @@ const chatSuite = "server/src/__tests__/chat-channels.integration.test.ts";
 // Inside the PR workflow's plain server shards, which carry no Rust cache,
 // that build was a ~4m30s cold compile of every third-party crate on each run
 // (277s of a 291s shard vitest step, actions run 35246999382, 2026-09-17).
-const nativeRunnerSuite =
-  "server/src/services/native-runtime/native-codex-runner.integration.test.ts";
+const nativeRunnerSuites = [
+  "server/src/services/native-runtime/native-codex-runner.integration.test.ts",
+  "server/src/__tests__/dot-runner.test.ts",
+];
 // In the PR workflow (pr.yml, the caller of pr-trusted.yml — reusable
 // workflows inherit the caller's GITHUB_WORKFLOW), the last Verify Paperclip
 // Runner vitest shard runs the native-runner group instead, because those
@@ -97,7 +99,7 @@ const nativeRunnerSuite =
 const prWorkflowName = "PR";
 const nativeRunnerSuiteRunsInRustCachedLane = process.env.GITHUB_WORKFLOW === prWorkflowName;
 const withoutChatExcludedSuites = nativeRunnerSuiteRunsInRustCachedLane
-  ? [chatSuite, nativeRunnerSuite]
+  ? [chatSuite, ...nativeRunnerSuites]
   : [chatSuite];
 const generalWorkspacesAGroupName = "general-workspaces-a";
 const generalWorkspacesBGroupName = "general-workspaces-b";
@@ -439,7 +441,7 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
   }
   if (groupName === generalServerNativeRunnerGroupName) {
     runVitest(
-      ["--project", "@paperclipai/server", ...serializedServerVitestArgs, nativeRunnerSuite],
+      ["--project", "@paperclipai/server", ...serializedServerVitestArgs, ...nativeRunnerSuites],
       "native runner vertical-slice suite",
     );
     return;
@@ -578,7 +580,7 @@ if (options.dryRun) {
         generalServerSuiteCount: generalServerTestFiles.length,
         selectedGeneralServerSuites:
           options.mode === generalModeName && options.group === generalServerNativeRunnerGroupName
-            ? [nativeRunnerSuite]
+            ? nativeRunnerSuites
             : options.mode === generalModeName &&
                 [generalServerGroupName, generalServerWithoutChatGroupName].includes(options.group) &&
                 options.shardCount !== null

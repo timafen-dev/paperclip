@@ -42,6 +42,7 @@ const apiPrefixes: Record<string, string> = {
   "connection-intents.ts": "/api",
   "costs.ts": "/api",
   "dashboard.ts": "/api",
+  "dot-runner.ts": "/api",
   "decision-queues.ts": "/api",
   "decisions.ts": "/api",
   "decision-training.ts": "/api",
@@ -110,6 +111,12 @@ const explicitOpenApiOperationCoverageExclusions = new Set([
   "GET /mcp/oauth/authorize",
   "POST /mcp/oauth/token",
   "POST /mcp/oauth/revoke",
+  "GET /.well-known/oauth-authorization-server/mcp/runner/oauth",
+  "POST /mcp/runner/oauth/register",
+  "POST /mcp/runner/oauth/device_authorization",
+  "GET /mcp/runner/oauth/authorize",
+  "POST /mcp/runner/oauth/token",
+  "POST /mcp/runner/oauth/revoke",
   // This endpoint is authenticated by the provider signature rather than by a
   // Paperclip board/agent credential. It intentionally stays out of the public
   // board API document, while this exact exclusion keeps route coverage honest.
@@ -204,6 +211,28 @@ function loadActualRoutes() {
         excludedRoutes.add(operation);
       } else {
         routes.add(operation);
+      }
+    }
+
+    if (file === "public-mcp.ts") {
+      // The shared gateway mounts these protocol paths for each OAuth resource.
+      if (source.includes("router.get(metadataPath,")) {
+        excludedRoutes.add("GET /.well-known/oauth-authorization-server");
+        excludedRoutes.add("GET /.well-known/oauth-authorization-server/mcp/runner/oauth");
+      }
+      for (const match of source.matchAll(/router\.(get|post)\(oauthPath \+ "([^"]+)"/g)) {
+        for (const oauthPath of ["/mcp/oauth", "/mcp/runner/oauth"]) {
+          const operation = `${match[1].toUpperCase()} ${oauthPath}${match[2]}`;
+          if (explicitOpenApiOperationCoverageExclusions.has(operation)) excludedRoutes.add(operation);
+          else routes.add(operation);
+        }
+      }
+    }
+    if (file === "dot-runner.ts") {
+      const basePath = /const path = "([^"]+)"/.exec(source)?.[1];
+      if (!basePath) throw new Error("Dot binding route prefix is missing");
+      for (const match of source.matchAll(/router\.(get|post|delete)\(path(?: \+ "([^"]+)")?/g)) {
+        routes.add(`${match[1].toUpperCase()} ${normalizeExpressPath(prefix + basePath + (match[2] ?? ""))}`);
       }
     }
 

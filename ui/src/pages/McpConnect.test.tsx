@@ -8,7 +8,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import { McpConnectPage, McpDevicePage } from "./McpConnect";
 
-const route = vi.hoisted(() => ({ id: "request-one", companyId: null as string | null, unavailable: false, canWrite: true, requestedWrite: true, requestedConfigure: false, clientName: "Assistant", clientOrigin: null as string | null, setupUrl: "https://my.paperclip.app/orgs/new", reverseCompanies: false, hideFirst: false }));
+const route = vi.hoisted(() => ({ id: "request-one", companyId: null as string | null, unavailable: false, canWrite: true, requestedWrite: true, requestedConfigure: false, agentConnection: false, clientName: "Assistant", clientOrigin: null as string | null, setupUrl: "https://my.paperclip.app/orgs/new", reverseCompanies: false, hideFirst: false }));
 vi.mock("@/lib/router", () => ({
   useParams: () => ({ id: route.id }),
   Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
@@ -19,7 +19,7 @@ vi.mock("@/components/CompanyPatternIcon", () => ({
 vi.mock("../api/client", () => ({ api: {
   get: vi.fn(async () => ({
     id: route.id, clientName: route.clientName, clientOrigin: route.clientOrigin, redirectOrigin: "https://assistant.example.test",
-    requestedWrite: route.requestedWrite, requestedConfigure: route.requestedConfigure, offlineAccess: true, requiresSignIn: false, requestedCompanyId: route.companyId,
+    requestedWrite: route.requestedWrite, requestedConfigure: route.requestedConfigure, agentConnection: route.agentConnection, offlineAccess: true, requiresSignIn: false, requestedCompanyId: route.companyId,
     companies: route.unavailable ? [] : [
       { id: route.companyId ?? "company-one", name: "Acme Research", logoUrl: "/api/assets/acme-logo/content", canWrite: route.canWrite },
       ...(!route.companyId ? [{ id: "company-two", name: "Design Partners", logoUrl: null, canWrite: true }] : []),
@@ -29,7 +29,7 @@ vi.mock("../api/client", () => ({ api: {
 } }));
 
 beforeEach(() => {
-  Object.assign(route, { id: "request-one", companyId: null, unavailable: false, canWrite: true, requestedWrite: true, requestedConfigure: false, clientName: "Assistant", clientOrigin: null, setupUrl: "https://my.paperclip.app/orgs/new", reverseCompanies: false, hideFirst: false });
+  Object.assign(route, { id: "request-one", companyId: null, unavailable: false, canWrite: true, requestedWrite: true, requestedConfigure: false, agentConnection: false, clientName: "Assistant", clientOrigin: null, setupUrl: "https://my.paperclip.app/orgs/new", reverseCompanies: false, hideFirst: false });
   vi.clearAllMocks();
 });
 
@@ -179,6 +179,25 @@ it("denies without granting default work or configuration access", async () => {
     await vi.waitFor(() => expect(page.checkbox()?.getAttribute("aria-checked")).toBe("true"));
     flushSync(() => Array.from(page.container.querySelectorAll("button")).find(button => button.textContent === "Cancel")!.click());
     await vi.waitFor(() => expect(api.post).toHaveBeenCalledWith("/mcp/requests/request-one/consent", { decision: "deny", companyId: "company-one", allowWrites: false, allowConfiguration: false }));
+  } finally { page.cleanup(); }
+});
+
+it.each([false, true])("explains Dot agent consent and requires an operator in both browser and device flows (device=%s)", async device => {
+  Object.assign(route, { companyId: "company-one", agentConnection: true, canWrite: false });
+  const page = setup(device);
+  const connect = () => Array.from(page.container.querySelectorAll("button")).find(button => button.textContent === "Connect Dot agent")!;
+  try {
+    await vi.waitFor(() => expect(page.container.textContent).toContain("Connect Dot as a Paperclip agent"));
+    expect(page.container.textContent).not.toContain("Read all of your Paperclip data");
+    expect(page.checkbox()).toBeNull();
+    expect(connect().disabled).toBe(true);
+    route.canWrite = true;
+    await page.client.invalidateQueries({ queryKey: [device ? "mcp-device" : "mcp-request", device ? "MIST-YPED" : route.id] });
+    await vi.waitFor(() => expect(connect().disabled).toBe(false));
+    flushSync(() => connect().click());
+    await vi.waitFor(() => expect(api.post).toHaveBeenCalledWith(device ? "/mcp/device/consent" : "/mcp/requests/request-one/consent", {
+      decision: "approve", companyId: "company-one", allowWrites: false, allowConfiguration: false, ...(device ? { userCode: "MIST-YPED" } : {}),
+    }));
   } finally { page.cleanup(); }
 });
 

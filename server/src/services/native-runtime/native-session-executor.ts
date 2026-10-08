@@ -1,3 +1,4 @@
+import { dotRunnerBroker } from "../dot-runner-broker.js";
 import { configuredEnvironment } from "../../vendor/paperclip-runner/index.js";
 import { CURSOR_DISTRIBUTION_PINS, QUALIFIED_ACPX_PROFILES, QUALIFIED_ACPX_VERSION } from "../../vendor/paperclip-runner/index.js";
 import { isProviderMode } from "../../vendor/paperclip-runner/index.js";
@@ -1570,6 +1571,7 @@ function nativeSessionKey(execution: NativeExecutionInput): string {
 }
 
 function nativeSessionWorkspaceScope(execution: NativeExecutionInput) {
+  if (execution.provider.kind === "openai_dot") return { kind: "none" as const };
   // Projectless local runs use the heartbeat run id as a durable placeholder
   // rather than fabricating an execution_workspaces row. Do not let that
   // per-run placeholder break continuity for the same provider session; the
@@ -1592,6 +1594,7 @@ function nativeSessionWorkspaceScope(execution: NativeExecutionInput) {
 
 function nativeProviderSessionScope(execution: NativeExecutionInput) {
   switch (execution.provider.kind) {
+    case "openai_dot": return { kind: "openai_dot", bindingId: execution.provider.binding.bindingId, generation: execution.provider.binding.bindingGeneration };
     case "claude_managed":
       return {
         kind: execution.provider.kind,
@@ -2759,7 +2762,7 @@ export async function verifyStoppedNativeSessionForReplacement(
     // A partial final write is not a closed transcript.
     if (!bytes.toString("utf8").endsWith("\n")) return null;
     const rows = bytes.toString("utf8").trimEnd().split("\n").map(line => JSON.parse(line));
-    if (!stoppedCodexTurnIsTextOnly({ rows, threadId: provider.providerSessionId, turnId, cwd: execution.workspace.cwd, completedTaskControlCalls })) return null;
+    if (!stoppedCodexTurnIsTextOnly({ rows, threadId: provider.providerSessionId, turnId, cwd: execution.workspace.cwd ?? "", completedTaskControlCalls })) return null;
     const rolloutSha256 = nativeSha256(bytes.toString("utf8"));
     const evidence = { schema: "paperclip.stopped_text_turn.v1", runId: run.id, nativeSessionId: run.nativeSessionId,
       runnerInstanceId: run.runnerInstanceId, processPid: stopped.processPid, providerPid: provider.processId,
@@ -3514,7 +3517,7 @@ export async function reconcileRetainedNativeSessionCleanup(
       environment: buildNativeProviderEnvironment(
         {},
         process.env,
-        owned.execution.workspace.cwd,
+        owned.execution.workspace.cwd ?? undefined,
       ),
       authorize,
       recordEpoch: async (receipt) => {
@@ -5459,6 +5462,8 @@ function canonicalJson(value: unknown): string {
 
 function runnerProviderStateFilename(execution: NativeExecutionInput): string {
   switch (execution.provider.kind) {
+    case "openai_dot":
+      return "dot-provider-state.json";
     case "codex":
     case "opencode":
       return "codex-provider-state.json";
@@ -5491,6 +5496,9 @@ export function providerSessionIdentityFromDurableProviderState(input: {
     providerSessionIdentity: null,
   });
   switch (input.execution.provider.kind) {
+    case "openai_dot":
+      // Dot checkpoints recover the bridge only; there is no native provider thread.
+      return emptyIdentity();
     case "acpx": {
       const descriptor = record(state.descriptor);
       const identity = record(state.identity);
@@ -7445,11 +7453,17 @@ export async function executePaperclipNativeSession(input: {
     // a later sweep from closing an owner this turn is about to acquire.
     await closingWarmNativeSessions.get(sessionScopeId);
 
+    if (input.execution.provider.kind === "openai_dot") {
+      if (input.runnerExecutionTarget?.kind === "remote") throw new Error("dot_requires_local_runner_controller");
+      return await executePaperclipNativeSessionWithinScope(input);
+    }
+    const workspaceRoot = input.execution.workspace.cwd;
+    if (workspaceRoot === null) throw new Error("native_workspace_required");
     const targetKind = input.runnerExecutionTarget?.kind ?? "local";
     const chatAttachmentReadScope = new NativeChatAttachmentReadScope({
       db: input.db,
       binding: input.execution.binding,
-      workspaceRoot: input.execution.workspace.cwd,
+      workspaceRoot,
       executionTargetKind: targetKind,
     });
     preparedInput = { ...input, chatAttachmentReadScope };
@@ -7461,7 +7475,7 @@ export async function executePaperclipNativeSession(input: {
         issueId: input.execution.binding.issueId,
         runId: input.execution.binding.runId,
         agentId: input.execution.binding.agentId,
-        workspaceRoot: input.execution.workspace.cwd,
+        workspaceRoot,
         executionTargetKind: targetKind,
       },
     });
@@ -7545,7 +7559,8 @@ async function executePaperclipNativeSessionWithinScope(
     input.execution.provider.kind !== "opencode" &&
     input.execution.provider.kind !== "claude_managed" &&
     input.execution.provider.kind !== "aws_agentcore" &&
-    input.execution.provider.kind !== "acpx"
+    input.execution.provider.kind !== "acpx" &&
+    input.execution.provider.kind !== "openai_dot"
   ) {
     throw new Error("paperclip_runner_provider_unsupported");
   }
@@ -8458,8 +8473,8 @@ async function executePaperclipNativeSessionWithinScope(
         })
       : null;
   }
-  const runnerExecution =
-    input.useRunnerd && input.runnerExecutionTarget?.kind === "remote"
+  const runnerExecution: NativeExecutionInput =
+    input.execution.schema !== "paperclip.native-execution-input.v6" && input.useRunnerd && input.runnerExecutionTarget?.kind === "remote"
       ? {
           ...input.execution,
           workspace: {
@@ -8478,7 +8493,8 @@ async function executePaperclipNativeSessionWithinScope(
     controller,
   });
   try {
-    if (input.managedGitHub) {
+    if (input.managedGitHub && input.execution.provider.kind !== "openai_dot") {
+      if (!input.execution.workspace.cwd) throw new Error("native_workspace_required");
       githubAccess ??= await createNativeGitHubAccess({
         scope: input.execution.binding,
         target: input.runnerExecutionTarget,
@@ -9459,6 +9475,7 @@ async function executePaperclipNativeSessionWithinScope(
     resultJson: {
       nativeResult: native.result as unknown as Record<string, unknown>,
       nativeTerminal: native.terminal as unknown as Record<string, unknown>,
+      ...(input.execution.provider.kind === "openai_dot" ? { providerAccounting: { usage: null, cost: null, externallyBilled: true }, externalStopConfirmed: false } : {}),
       ...(providerFailure ? { nativeProviderFailure: providerFailure.diagnostic } : {}),
       ...(native.goalRolloverRequired ? { goalRolloverRequired: true } : {}),
       planSynchronizations,
@@ -9469,7 +9486,7 @@ async function executePaperclipNativeSessionWithinScope(
     ...resolveNativeBilling(input.execution.provider, input.runnerEnvironment, input.billingIdentity),
     model: input.execution.provider.model,
     usage: normalizeNativeUsage(native.usage, { inputIncludesCacheReads: input.execution.provider.kind === "codex" }),
-    costUsd: normalizeNativeUsage(native.usage, { inputIncludesCacheReads: input.execution.provider.kind === "codex" })
+    costUsd: input.execution.provider.kind !== "openai_dot" && normalizeNativeUsage(native.usage, { inputIncludesCacheReads: input.execution.provider.kind === "codex" })
       ? nativeUsageCostUsd(native.usage, input.execution.provider) ?? null : null,
     costUsdExact: typeof native.usage?.accountingCostUsdExact === "string" ? native.usage.accountingCostUsdExact : undefined,
     costStatus: nativeAccountingComplete && native.usage?.accountingCostIncomplete !== true
@@ -11159,7 +11176,7 @@ async function createRunnerdBackendWithinSessionClaim(
         ? input.execution.runtimeContext.mcp.digest
         : undefined,
     workMode: input.execution.task.workMode,
-    workspaceRoot: remoteTarget?.remoteCwd ?? input.execution.workspace.cwd,
+    workspaceRoot: remoteTarget?.remoteCwd ?? input.execution.workspace.cwd ?? undefined,
     executionTargetKind: target.kind,
     readRemoteWorkspaceFile: remoteTarget && remoteCommandRunner
       ? (file) => readVerifiedRemoteWorkspaceFile({ runner: remoteCommandRunner, workspaceRoot: remoteTarget.remoteCwd, ...file })
@@ -11198,6 +11215,32 @@ async function createRunnerdBackendWithinSessionClaim(
     input.durableEnvironmentLeaseId ??
     input.execution.binding.executionWorkspaceId;
   mkdirSync(root, { recursive: true, mode: 0o700 });
+  if (input.execution.schema === "paperclip.native-execution-input.v6") {
+    if (target.kind !== "local") throw new Error("dot_runner_requires_local_controller: Dot has no mounted workspace or sandbox process");
+    const recoveredProcess = input.restartRecovery?.kind === "reattach_existing_runner" ? input.restartRecovery.process : null;
+    const backend = createNativeSessionBackend(input.execution, {
+      onSpawn: input.onSpawn, dynamicTools,
+      dynamicToolHandler: async call => { await dotRunnerBroker(input.db).assertRunAuthority(input.execution as import("../../vendor/paperclip-runner/index.js").NativeExecutionInputV6); return authorityEpoch.execute(call); },
+      completionFeedback: async result => { await dotRunnerBroker(input.db).assertRunAuthority(input.execution as import("../../vendor/paperclip-runner/index.js").NativeExecutionInputV6); await authorityEpoch.definitions(); return nativeCompletionFeedback(input.db, input.execution.binding.runId, result); },
+      dotRunnerOptions: {
+        stateDirectory: root, runnerBinary: resolvePaperclipRunnerBinary(),
+        identity: { runnerInstanceId: effectiveRunnerInstanceId, environmentLeaseId: effectiveEnvironmentLeaseId,
+          runId: input.execution.binding.runId, normalizedSessionId: nativeSessionKey(input.execution),
+          turnId: `turn-${input.execution.binding.runId}`, itemId: `item-${input.execution.binding.runId}` },
+        port: dotRunnerBroker(input.db).port(input.execution),
+        controlPlaneRegistration: async authority => registerRunnerPrpAuthority({ companyId: input.execution.binding.companyId,
+          issueId: input.execution.binding.issueId, agentId: input.execution.binding.agentId,
+          runId: input.execution.binding.runId, authority }),
+        adoptExistingRunner: recoveredProcess ? { ...recoveredProcess,
+          isAlive: () => verifiedRecoveryProcessIsAlive(recoveredProcess),
+          signal: signal => signalVerifiedRecoveryProcess(recoveredProcess, signal) } : undefined,
+      },
+    });
+    const prior = sessionToolAuthorityEpochs.get(sessionScopeId); if (prior) prior.revoke();
+    sessionToolAuthorityEpochs.set(sessionScopeId, authorityEpoch);
+    return { ...backend, descriptor: () => backend.descriptor(), openSession: input => backend.openSession(input),
+      recoverSession: (snapshot, options) => backend.recoverSession!(snapshot, options), bindManagedSession: session => session };
+  }
   const remoteRuntimeRoot = remoteTarget
     ? posix.join(
         remoteTarget.remoteCwd,

@@ -729,6 +729,12 @@ configuration, plugin packages and outstanding hosted release gates. The
 [delivery plan](plans/2026-09-30-paperclip-public-mcp-and-plugins.md) separates
 external agent participation and granted third-party tools into later releases.
 
+The experimental OpenAI Dot Runner provider uses a separate `/mcp/runner`
+agent OAuth resource. It reuses browser/device consent and signed event delivery
+while preserving agent pairing, normal run admission and task authority.
+Personal grants cannot authorize Runner operations. See
+[OpenAI Dot Runner](openai-dot-runner.md) for its supported release boundary.
+
 ### Experimental connection routing
 
 A virtual AI connection can rotate new task/agent allocations through an

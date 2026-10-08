@@ -605,7 +605,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     : overlay.adapterType ?? props.agent.adapterType;
   const getCapabilities = useAdapterCapabilities();
   const adapterCaps = getCapabilities(adapterType);
-  const isLocal = adapterCaps.supportsInstructionsBundle || adapterCaps.supportsSkills || adapterCaps.supportsLocalAgentJwt;
+  const isDotRunner = adapterType === "paperclip_runner" && (isCreate ? props.values.adapterSchemaValues?.provider : eff("adapterConfig", "provider", config.provider)) === "openai_dot";
+  const isLocal = !isDotRunner && (adapterCaps.supportsInstructionsBundle || adapterCaps.supportsSkills || adapterCaps.supportsLocalAgentJwt);
   
   // The legacy working directory is an absolute path on the host, so the
   // managed-sandbox-only policy hides it. A stored value stays untouched; it is
@@ -946,6 +947,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
 
   /** Props passed to adapter-specific config field components */
   const adapterFieldProps = {
+    companyId: selectedCompanyId ?? undefined,
+    agentId: isCreate ? undefined : props.agent.id,
     mode,
     isCreate,
     adapterType,
@@ -961,8 +964,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     // Resolve the effective instructions-file gate once. The instructions file
     // is an absolute host path, so the managed-sandbox-only policy hides it for
     // every adapter without a per-adapter edit.
-    hideInstructionsFile: hideInstructionsFile || hideHostPaths,
-    managedSandboxOnly: hideHostPaths,
+    hideInstructionsFile: hideInstructionsFile || hideHostPaths || isDotRunner,
+    managedSandboxOnly: hideHostPaths || isDotRunner,
   };
 
   // Section toggle state — advanced always starts collapsed
@@ -1668,7 +1671,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
             </Field>
           )}
 
-          {!isCreate && selectedCompanyId && <AiConnectionField companyId={selectedCompanyId} agentId={props.agent.id} agentName={props.agent.name} adapterType={aiRoutingHarness(adapterType, eff("adapterConfig", "provider", config.provider), eff("adapterConfig", "acpxAgent", config.acpxAgent))}
+          {!isDotRunner && !isCreate && selectedCompanyId && <AiConnectionField companyId={selectedCompanyId} agentId={props.agent.id} agentName={props.agent.name} adapterType={aiRoutingHarness(adapterType, eff("adapterConfig", "provider", config.provider), eff("adapterConfig", "acpxAgent", config.acpxAgent))}
             routerAdapterType={adapterType} value={aiRuntimeConnectionBindingSchema.safeParse((overlay.runtime.runtimeConfig as Record<string, unknown> | undefined)?.aiConnection ?? runtimeConfig.aiConnection).data}
             model={String(eff("adapterConfig", "model", config.model) ?? "")} environmentId={currentDefaultEnvironmentId || undefined} legacy
             onChange={binding => mark("runtime", "runtimeConfig", { ...runtimeConfig, aiConnection: binding })} />}

@@ -1704,6 +1704,7 @@ function resolveOperationAuthLevel(
   const key = operationKey(method, path);
   if (key === "GET /api/mcp/requests/{id}" || key === "GET /api/mcp/device") return "public";
   if (path === "/api/mcp/setup" || path === "/api/mcp/device/consent" || path.startsWith("/api/mcp/requests/") || path.startsWith("/api/mcp/connections")) return "board";
+  if (/^\/api\/companies\/\{companyId\}\/agents\/\{agentId\}\/dot-binding(?:\/event-test)?$/.test(path)) return "board";
   if (PUBLIC_OPERATIONS.has(key)) return "public";
   if (key === "POST /api/companies/{companyId}/agent-commentary") return "agent_heartbeat";
   if (key === "POST /api/mcp/project-tools" || key === "POST /api/companies/{companyId}/slack/tasks/{issueId}/tools") return "agent_run";
@@ -11700,6 +11701,30 @@ registerCurrentRoute({
     403: r.forbidden,
     404: r.notFound,
   },
+});
+
+registerCurrentRoute({
+  method: "get", path: "/api/companies/{companyId}/agents/{agentId}/dot-binding", tags: ["agents"],
+  summary: "Read the experimental Dot agent connection and event readiness",
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+registerCurrentRoute({
+  method: "post", path: "/api/companies/{companyId}/agents/{agentId}/dot-binding", tags: ["agents"],
+  summary: "Create a one-use Dot pairing code as a company operator",
+  body: z.object({ dotUrl: z.string().max(2048).optional() }).strict(),
+  responses: { 201: r.ok(z.object({ bindingId: z.string().uuid(), pairingCode: z.string(), expiresAt: z.string().datetime(), instructions: z.string() })),
+    400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+registerCurrentRoute({
+  method: "post", path: "/api/companies/{companyId}/agents/{agentId}/dot-binding/event-test", tags: ["agents"],
+  summary: "Request a harmless Dot readiness challenge as a company operator",
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+registerCurrentRoute({
+  method: "delete", path: "/api/companies/{companyId}/agents/{agentId}/dot-binding", tags: ["agents"],
+  summary: "Revoke a Dot connection and fence its active Paperclip assignments",
+  responses: { 204: { description: "Dot connection revoked; external stop is unconfirmed" },
+    400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registerCurrentRoute({

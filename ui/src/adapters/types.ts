@@ -23,6 +23,8 @@ export interface AdapterConfigFieldsProps {
   section?: AdapterConfigSection;
   /** The shared local-adapter model picker is already rendered by the form. */
   hideModel?: boolean;
+  companyId?: string;
+  agentId?: string;
   mode: "create" | "edit";
   isCreate: boolean;
   adapterType: string;

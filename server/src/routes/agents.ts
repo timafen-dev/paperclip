@@ -2,6 +2,8 @@ import { aiRoutingHarness } from "@paperclipai/shared";
 import { agentIdentityService } from "../services/agent-identity.js";
 import { aiConnectionRouterService, poolMemberRuntimeConfig } from "../services/ai-connection-router.js";
 import { connectionIntentService } from "../services/connection-intents.js";
+import { dotRunnerBroker } from "../services/dot-runner-broker.js";
+import { publicMcpConfig } from "../services/public-mcp/oauth.js";
 import { connectionIntentDeliveryService } from "../services/connection-intent-delivery.js";
 import { completeConnectionIntentSchema } from "@paperclipai/shared";
 import { cancellationRequestId } from "../services/native-runtime/native-cancellation-request.js";
@@ -269,6 +271,7 @@ import {
 import {
   PaperclipRunnerProviderProfileError,
   resolvePaperclipRunnerProviderProfile,
+  validatePaperclipRunnerDotConfig,
 } from "../services/native-runtime/provider-profile.js";
 import { managedAgentProfileService } from "../services/managed-agent-profiles.js";
 import { remoteAgentProfileService } from "../services/remote-agent-profiles.js";
@@ -2262,6 +2265,10 @@ export function agentRoutes(
     if (adapterType !== "paperclip_runner") return;
     let profile;
     try {
+      if (adapterConfig.provider === "openai_dot") {
+        validatePaperclipRunnerDotConfig(adapterConfig, false);
+        return;
+      }
       profile = resolvePaperclipRunnerProviderProfile(adapterConfig);
     } catch (error) {
       if (error instanceof PaperclipRunnerProviderProfileError) {
@@ -2295,6 +2302,7 @@ export function agentRoutes(
     ) {
       return input.nextAdapterConfig;
     }
+    if (input.nextAdapterConfig.provider === "openai_dot") return input.nextAdapterConfig;
     const defaults = paperclipRunnerTransitionConfig(input.previousAdapterType, input.previousAdapterConfig.model, input.nextAdapterConfig.provider);
     if (!["claude_local", "codex_local", "opencode_local"].includes(input.previousAdapterType)
       && !isPaperclipRunnerProvider(input.nextAdapterConfig.provider)) {
@@ -3095,7 +3103,9 @@ export function agentRoutes(
     role: string | null | undefined,
     adapterType: string,
     boardOnboardingFirstAgent = false,
+    adapterConfig?: Record<string, unknown>,
   ): AgentDesiredSkillEntry[] | undefined {
+    if (adapterType === "paperclip_runner" && adapterConfig?.provider === "openai_dot") return undefined;
     if (role !== "ceo" && !boardOnboardingFirstAgent) return undefined;
     const adapter = findActiveServerAdapter(adapterType);
     if (!adapter?.listSkills && !adapter?.syncSkills) return undefined;
@@ -3660,6 +3670,20 @@ export function agentRoutes(
         adapterConfigForTest = canRestoreEnv
           ? restoreRedactedAgentEnv(inputAdapterConfig, savedAgent.adapterConfig)
           : inputAdapterConfig;
+      }
+      if (type === "paperclip_runner" && inputAdapterConfig.provider === "openai_dot") {
+        const binding = savedAgentId ? await dotRunnerBroker(db).bindingForAgent(companyId, savedAgentId) : null;
+        let resource: ReturnType<typeof publicMcpConfig> = null;
+        try { resource = publicMcpConfig(process.env); } catch { /* diagnostic below */ }
+        const checks: AdapterEnvironmentCheck[] = [
+          { code: "dot_enabled", level: dotRunnerBroker(db).enabled() ? "info" : "error", message: dotRunnerBroker(db).enabled() ? "Dot is enabled." : "Enable PAPERCLIP_ENABLE_OPENAI_DOT=1 on the server." },
+          { code: "dot_public_endpoint", level: resource?.origin.startsWith("https://") ? "info" : "error", message: resource?.origin.startsWith("https://") ? "Public HTTPS MCP origin is configured." : "Configure a stable public HTTPS PAPERCLIP_PUBLIC_URL." },
+          { code: "dot_unmetered", level: inputAdapterConfig.allowUnmeteredProvider === true ? "info" : "error", message: "Dot usage and provider cost are unavailable. Explicit externally billed provider acknowledgement is required." },
+          { code: "dot_binding", level: binding?.status === "ready" && binding.subscriptionVerified && binding.id === inputAdapterConfig.dotBindingId ? "info" : "warn", message: binding?.status === "ready" && binding.subscriptionVerified ? "Binding has a verified event subscription and completed readiness challenge." : "Save this agent, pair it, subscribe to mailbox events and complete the event test." },
+          { code: "dot_controller", level: requestedEnvironmentId && (await environmentsSvc.getById(requestedEnvironmentId))?.driver !== "local" ? "error" : "info", message: "Dot currently requires a self-hosted local Runner controller." },
+        ];
+        res.json({ adapterType: type, status: checks.some(c => c.level === "error") ? "fail" : checks.some(c => c.level === "warn") ? "warn" : "pass", testedAt: new Date().toISOString(), checks });
+        return;
       }
       const normalizedAdapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
         companyId,
@@ -4766,6 +4790,7 @@ export function agentRoutes(
           hireInput.role,
           hireInput.adapterType,
           hireOnboardingFirstAgent === true && req.actor.type === "board",
+          requestedAdapterConfig,
         ),
       ),
       "add",
@@ -5071,6 +5096,7 @@ export function agentRoutes(
           createInput.role,
           createInput.adapterType,
           createOnboardingFirstAgent === true && req.actor.type === "board",
+          requestedAdapterConfig,
         ),
       ),
       "add",

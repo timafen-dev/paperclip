@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const DOT_RUNNER_MCP_PATH = "/mcp/runner";
+export const DOT_RUNNER_MCP_SCOPES = ["paperclip:agent", "offline_access"] as const;
 export const PUBLIC_MCP_PATH = "/mcp/paperclip";
 export const PUBLIC_MCP_SCOPES = ["paperclip:read", "paperclip:write", "paperclip:configure", "offline_access"] as const;
 export const mcpConsentSchema = z.object({
@@ -14,6 +16,7 @@ export interface McpConnectionRequest {
   clientName: string;
   redirectOrigin: string;
   clientOrigin?: string | null;
+  agentConnection?: boolean;
   requestedWrite: boolean;
   requestedConfigure?: boolean;
   offlineAccess: boolean;

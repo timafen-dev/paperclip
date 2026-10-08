@@ -1899,7 +1899,8 @@ export async function executeNativeSession(
   if ("runtimeContext" in input) {
     const capabilities = descriptor.runtimeContextCapabilities;
     const unsupported = (["instructions", "skills", "mcp"] as const).filter(
-      (key) => capabilities?.[key] !== "native",
+      (key) => capabilities?.[key] !== "native" && (input.provider.kind !== "openai_dot"
+        || key === "instructions" || (key === "skills" ? input.runtimeContext.skills.length > 0 : input.runtimeContext.mcp.bindingId !== null)),
     );
     if (unsupported.length)
       throw new Error(
@@ -2090,7 +2091,7 @@ export async function executeNativeSession(
       };
       const replacementInput = {
         identity,
-        workingDirectory: input.workspace.cwd,
+        workingDirectory: input.workspace.cwd ?? undefined,
       };
       session = await runAbortableOperationWithin({
         timeoutMs: recoveryTimeoutMs,
@@ -2123,7 +2124,7 @@ export async function executeNativeSession(
     const bootstrapTimeoutMs = options.timeoutMs ?? 900_000;
     const bootstrapInput = {
       identity,
-      workingDirectory: input.workspace.cwd,
+      workingDirectory: input.workspace.cwd ?? undefined,
     };
     session = await runAbortableOperationWithin({
       timeoutMs: bootstrapTimeoutMs,

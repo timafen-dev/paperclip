@@ -1,5 +1,6 @@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import { AdapterMark } from "../../components/AdapterMark";
+import { DotRunnerConnection } from "../../components/DotRunnerConnection";
 import { configFieldsForSection } from "../config-sections";
 import type { AdapterConfigFieldsProps } from "../types";
 import {
@@ -44,10 +45,13 @@ const runnerHarnessOptions = [
   { value: "aws_agentcore", label: "AWS AgentCore", adapter: "aws_agentcore" },
   { value: "acpx", label: "ACP agents", adapter: "acpx_local" },
   { value: "grok", label: "Grok Build", adapter: "grok_local" },
+  { value: "openai_dot", label: "OpenAI Dot (experimental)", adapter: "codex_local" },
 ];
 
 export function CodexLocalConfigFields({
   section,
+  companyId,
+  agentId,
   mode,
   isCreate,
   adapterType,
@@ -211,7 +215,9 @@ export function CodexLocalConfigFields({
                 ? value
                 : "codex";
               const model =
-                provider === "opencode"
+                provider === "openai_dot"
+                  ? ""
+                  : provider === "opencode"
                   ? defaultOpenCodeRunnerModel
                   : provider === "claude_managed"
                     ? defaultClaudeManagedModel
@@ -234,6 +240,10 @@ export function CodexLocalConfigFields({
                 mark("adapterConfig", "provider", provider);
                 mark("adapterConfig", "acpxSessionMode", undefined);
                 mark("adapterConfig", "model", model);
+                if (provider === "openai_dot") {
+                  mark("adapterConfig", "lifecycleMode", "per_turn");
+                  for (const key of ["cwd", "env", "instructionsFilePath", "command", "extraArgs", "engine", "modelReasoningEffort", "workspaceStrategy", "workspaceRuntime", "idleTimeoutMs", "acpxAgent", "managedProfileId", "agentCoreProfileId"]) mark("adapterConfig", key, undefined);
+                }
                 if (provider === "acpx") {
                   mark("adapterConfig", "acpxAgent", grok ? "grok" : "claude");
                 }
@@ -252,6 +262,13 @@ export function CodexLocalConfigFields({
           </Select>
         </Field>
       )}
+      {runnerManaged && runnerProvider === "openai_dot" && <>
+        <Field configSection="adapter" label="Dot connection" hint="A verified event round trip is required before assigning work.">
+          <DotRunnerConnection companyId={companyId} agentId={agentId} bindingId={String(runnerSchemaValue("dotBindingId", ""))} onBinding={id => updateRunnerSchemaValue("dotBindingId", id)} />
+        </Field>
+        <ToggleField label="Allow externally billed provider" hint="Dot does not report token usage or cost. Paperclip cannot enforce a provider spend ceiling; known company and agent budget limits still apply."
+          checked={runnerSchemaValue("allowUnmeteredProvider", false) === true} onChange={value => updateRunnerSchemaValue("allowUnmeteredProvider", value)} />
+      </>}
       {runnerManaged && runnerProvider === "acpx" && runnerSchemaValue("acpxAgent", "claude") !== "grok" && (
         <Field configSection="adapter" label="ACP agent" hint="Cursor uses Paperclip questions; per-run cost is unavailable. GitHub Copilot and Pi await qualification.">
           <Select
@@ -484,7 +501,7 @@ export function CodexLocalConfigFields({
           )}
         </Field>
       )}
-      {runnerManaged && (
+      {runnerManaged && runnerProvider !== "openai_dot" && (
         <Field configSection="runPolicy"
           label="Runner lifecycle"
           hint="Turn by turn suspends after each run. Warm keeps the same provider process available between governed runs."
@@ -504,7 +521,7 @@ export function CodexLocalConfigFields({
           </select>
         </Field>
       )}
-      {runnerManaged && runnerLifecycleMode === "warm" && (
+      {runnerManaged && runnerProvider !== "openai_dot" && runnerLifecycleMode === "warm" && (
         <Field configSection="runPolicy"
           label="Warm idle timeout (ms)"
           hint="After this much inactivity, runnerd checkpoints and suspends the provider session. The maximum is 24 hours."
@@ -768,7 +785,7 @@ export function CodexLocalConfigFields({
           )}
         </>
       )}
-      <LocalWorkspaceRuntimeFields
+      {runnerProvider !== "openai_dot" && <LocalWorkspaceRuntimeFields
         isCreate={isCreate}
         values={values}
         set={set}
@@ -778,7 +795,7 @@ export function CodexLocalConfigFields({
         mode={mode}
         adapterType={adapterType}
         models={models}
-      />
+      />}
     </>
   ));
 }

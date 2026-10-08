@@ -60,7 +60,7 @@ function McpConnectRequest({ id, device = false, onEditCode }: { id: string; dev
   const assistantName = clientName && !/^(assistant|mcp client)$/i.test(clientName) ? clientName : "your assistant";
   const clientOrigin = data?.clientOrigin || data?.redirectOrigin;
   const company = data?.companies.find((item) => item.id === selectedCompanyId);
-  const canApproveWrites = Boolean(company?.canWrite && writeEnabled);
+  const canApproveWrites = Boolean(!data?.agentConnection && company?.canWrite && writeEnabled);
   const allowWrites = Boolean(data?.requestedWrite && canApproveWrites);
   const allowConfiguration = Boolean(data?.requestedConfigure && canApproveWrites);
   const consent = useMutation({
@@ -98,8 +98,8 @@ function McpConnectRequest({ id, device = false, onEditCode }: { id: string; dev
             </label>)}
             {!data.companies.length && <p className="text-sm text-muted-foreground">This account has no available organizations. Ask an organization owner to add you, then reconnect from your assistant.</p>}
           </fieldset>}
-          <p className="text-sm">Read all of your Paperclip data</p>
-          {(data.requestedWrite || data.requestedConfigure) && <label htmlFor="mcp-allow-writes" className="flex items-start gap-3 text-sm leading-6">
+          <p className="text-sm">{data.agentConnection ? "Connect Dot as a Paperclip agent. Pair it with an agent after connecting; assigned work uses that agent’s permissions." : "Read all of your Paperclip data"}</p>
+          {(data.requestedWrite || data.requestedConfigure) && !data.agentConnection && <label htmlFor="mcp-allow-writes" className="flex items-start gap-3 text-sm leading-6">
             <span className="flex h-6 shrink-0 items-center">
               <Checkbox id="mcp-allow-writes" checked={canApproveWrites} disabled={!company?.canWrite || consent.isPending} onCheckedChange={(checked) => setWriteEnabled(checked === true)} />
             </span>
@@ -109,7 +109,7 @@ function McpConnectRequest({ id, device = false, onEditCode }: { id: string; dev
           {consent.error && <p className="text-sm text-destructive">{consent.error.message}</p>}
           <div className="flex items-center justify-between gap-3">
             <Button variant="outline" disabled={consent.isPending} onClick={() => consent.mutate("deny")}>Cancel</Button>
-            <Button className="h-auto min-h-10 min-w-0 shrink whitespace-normal" disabled={!company || consent.isPending} onClick={() => consent.mutate("approve")}>{consent.isPending ? "Connecting…" : "Connect organization"}</Button>
+            <Button className="h-auto min-h-10 min-w-0 shrink whitespace-normal" disabled={!company || (data.agentConnection && !company.canWrite) || consent.isPending} onClick={() => consent.mutate("approve")}>{consent.isPending ? "Connecting…" : data.agentConnection ? "Connect Dot agent" : "Connect organization"}</Button>
           </div>
         </>}
       </>}
@@ -134,7 +134,7 @@ export function AssistantConnectionsPage() {
     {active?.map((connection) => <Card key={connection.id} className="block space-y-2 p-4">
       <h2 className="font-medium"><Identity name={assistantConnectionDisplayName(connection)} avatarUrl={connection.user?.image} initials={deriveInitials(connection.user?.name ?? "You")} /></h2>
       <p className="text-sm text-muted-foreground">Organization: {connection.companyName}</p>
-      <p className="text-sm">{connection.scopes.includes("paperclip:write") ? "Read and edit work" : "Read only"}</p>
+      <p className="text-sm">{connection.scopes.includes("paperclip:agent") ? "Dot agent connection" : connection.scopes.includes("paperclip:write") ? "Read and edit work" : "Read only"}</p>
       {connection.scopes.includes("paperclip:configure") && <p className="text-sm">Configure agents, projects and skills</p>}
       <Button variant="outline" disabled={revoke.isPending} onClick={() => revoke.mutate(connection.id)}>Revoke connection</Button>
     </Card>)}

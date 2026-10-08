@@ -723,6 +723,21 @@ describe("agent routes adapter validation", () => {
     );
   });
 
+  it.each(["create", "convert"])("saves an unpaired Dot configuration for %s while refusing task admission", async mode => {
+    mockInstanceSettingsService.getExperimental.mockResolvedValue({ enableNativeRunner: true });
+    const app = await createApp();
+    const config = { provider: "openai_dot", lifecycleMode: "per_turn", allowUnmeteredProvider: true };
+    const response = await requestApp(app, baseUrl => mode === "create"
+      ? request(baseUrl).post("/api/companies/company-1/agents").send({ name: "Dot", adapterType: "paperclip_runner", adapterConfig: config })
+      : request(baseUrl).patch("/api/agents/11111111-1111-4111-8111-111111111111").send({ adapterType: "paperclip_runner", replaceAdapterConfig: true, adapterConfig: config }));
+    expect(response.status, JSON.stringify(response.body)).toBe(mode === "create" ? 201 : 200);
+    expect(response.body.adapterConfig).toMatchObject(config);
+    expect(response.body.adapterConfig.model).toBeUndefined();
+    expect(response.body.adapterConfig.codexPermissionMode).toBeUndefined();
+    const { resolvePaperclipRunnerProviderProfile } = await import("../services/native-runtime/provider-profile.js");
+    expect(() => resolvePaperclipRunnerProviderProfile(response.body.adapterConfig)).toThrow(expect.objectContaining({ code: "paperclip_runner_dot_config_invalid" }));
+  });
+
   it("normalizes legacy skills and permissions when switching to paperclip_runner", async () => {
     mockInstanceSettingsService.getExperimental.mockResolvedValue({ enableNativeRunner: true });
     const existing = await mockAgentService.getById();

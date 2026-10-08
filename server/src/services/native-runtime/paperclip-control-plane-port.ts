@@ -47,6 +47,7 @@ function isPrpEvent(value: NativeRunEvent | PrpEvent): value is PrpEvent {
   return "schema" in value && [
     "paperclip.prp.event.v1",
     "paperclip.prp.event.v2",
+    "paperclip.prp.event.v3",
   ].includes(value.schema);
 }
 

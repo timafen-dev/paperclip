@@ -50,7 +50,8 @@ export type NativeRuntimeResolution =
           | "opencode_server"
           | "claude_managed_agents_api"
           | "aws_agentcore_harness_api"
-          | "acpx_runtime";
+          | "acpx_runtime"
+          | "openai_dot_mcp";
         protocolVersion: 1;
       };
       authorityDecision: NativeStatusDecision;
@@ -130,6 +131,7 @@ export function resolveNativeRuntimeMode(input: {
     }
     throw error;
   }
+  if (runnerProfile.provider === "openai_dot" && process.env.PAPERCLIP_ENABLE_OPENAI_DOT !== "1") throw ineligible("paperclip_runner_dot_disabled", "OpenAI Dot is disabled for new work on this instance.");
   if (
     input.agent.adapterType !== "paperclip_runner"
     || input.agent.status !== "active" && input.agent.status !== "running"
@@ -242,6 +244,7 @@ export function resolveHeartbeatRuntimeMode(input: {
         ? "claude_managed"
         : resolution.profile.backend === "aws_agentcore_harness_api"
           ? "aws_agentcore"
+      : resolution.profile.backend === "openai_dot_mcp" ? "openai_dot"
       : resolution.profile.backend === "acpx_runtime"
           ? "acpx"
           : "codex",
@@ -292,6 +295,7 @@ export function resolveHeartbeatNativeRuntimeMode(input: {
           ? "claude_managed_agents_api"
           : driverKind === "aws_agentcore_harness_api"
             ? "aws_agentcore_harness_api"
+        : driverKind === "openai_dot_mcp" ? "openai_dot_mcp"
         : driverKind === "acpx_runtime"
             ? "acpx_runtime"
             : driverKind === null
