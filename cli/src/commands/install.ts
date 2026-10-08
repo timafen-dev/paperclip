@@ -275,6 +275,14 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     await runGitHubCurl(["--fail", "--silent", "--show-error", "--location", "--output", archivePath, `https://codeload.github.com/${repo}/tar.gz/${sha}`], runCommand, { maxBuffer: 4 * 1024 * 1024 });
     await runCommand("tar", ["-xzf", archivePath, "--strip-components=1", "-C", checkoutPath], { maxBuffer: 4 * 1024 * 1024 });
     await runCommand("corepack", ["enable", "pnpm", "--install-directory", pnpmShimDir], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 });
+    const rootMetadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "package.json"), "utf8")) as { packageManager?: string };
+    if (!rootMetadata.packageManager?.startsWith("pnpm@")) {
+      throw new Error("Git install requires a root packageManager pinned to pnpm.");
+    }
+    // npm pack runs package lifecycle scripts from isolated staging directories,
+    // outside the checkout that declares packageManager. Pin Corepack's global
+    // selection so those scripts use the checkout's pnpm instead of latest.
+    await runCommand("corepack", ["install", "--global", rootMetadata.packageManager], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 });
     await runCommand("corepack", ["pnpm", "install", "--frozen-lockfile"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand("bash", ["scripts/build-npm.sh", "--skip-checks", "--skip-typecheck"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand("corepack", ["pnpm", "-r", "--filter", "@paperclipai/server...", "--if-present", "run", "build"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
