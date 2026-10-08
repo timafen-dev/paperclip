@@ -278,8 +278,13 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     await runCommand("corepack", ["pnpm", "install", "--frozen-lockfile"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand("bash", ["scripts/build-npm.sh", "--skip-checks", "--skip-typecheck"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand("corepack", ["pnpm", "-r", "--filter", "@paperclipai/server...", "--if-present", "run", "build"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
-    // Bundled package staging bypasses the server's prepack hook. Produce its
-    // declared UI files from this same checkout before staging that package.
+    // Git installs bypass the release script, so materialize the generated
+    // package inputs that release.sh normally creates before packaging.
+    for (const packageDir of ["server", "packages/adapters/claude-local", "packages/adapters/codex-local"]) {
+      const skillsPath = path.join(checkoutPath, packageDir, "skills");
+      fs.rmSync(skillsPath, { recursive: true, force: true });
+      fs.cpSync(path.join(checkoutPath, "skills"), skillsPath, { recursive: true });
+    }
     await runCommand("corepack", ["pnpm", "--dir", "server", "prepare:ui-dist"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
     const workspacePackages = resolveGitInstallWorkspacePackages(checkoutPath);

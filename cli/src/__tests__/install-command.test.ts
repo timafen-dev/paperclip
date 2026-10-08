@@ -114,7 +114,7 @@ describe("managed install commands", () => {
         const packages = [
           { dir: "packages/shared", name: "@paperclipai/shared", packageJson: { name: "@paperclipai/shared", version: "0.3.1" } },
           { dir: "packages/db", name: "@paperclipai/db", packageJson: { name: "@paperclipai/db", version: "0.3.1", dependencies: { "@paperclipai/shared": "workspace:*" }, bundleDependencies: ["embedded-postgres"] } },
-          { dir: "server", name: "@paperclipai/server", packageJson: { name: "@paperclipai/server", version: "0.3.1", dependencies: { "@paperclipai/db": "workspace:*" }, ...(bundledServer ? { bundleDependencies: ["acpx"], files: ["dist", "ui-dist"] } : {}) } },
+          { dir: "server", name: "@paperclipai/server", packageJson: { name: "@paperclipai/server", version: "0.3.1", dependencies: { "@paperclipai/db": "workspace:*" }, ...(bundledServer ? { bundleDependencies: ["acpx"], files: ["dist", "ui-dist", "skills"] } : {}) } },
         ];
         fs.mkdirSync(path.join(checkout, "cli"), { recursive: true });
         fs.writeFileSync(path.join(checkout, "cli", "package.json"), JSON.stringify({ version: "0.3.1" }));
@@ -123,6 +123,11 @@ describe("managed install commands", () => {
         for (const workspacePackage of packages) {
           fs.mkdirSync(path.join(checkout, workspacePackage.dir), { recursive: true });
           fs.writeFileSync(path.join(checkout, workspacePackage.dir, "package.json"), JSON.stringify(workspacePackage.packageJson));
+        }
+        fs.mkdirSync(path.join(checkout, "skills", "sample-skill"), { recursive: true });
+        fs.writeFileSync(path.join(checkout, "skills", "sample-skill", "SKILL.md"), "# Sample skill\n");
+        for (const adapterDir of ["packages/adapters/claude-local", "packages/adapters/codex-local"]) {
+          fs.mkdirSync(path.join(checkout, adapterDir), { recursive: true });
         }
         return { stdout: "", stderr: "" };
       }
@@ -148,6 +153,8 @@ describe("managed install commands", () => {
         if (packageName === "paperclipai-server") {
           expect(fs.readFileSync(path.join(args[1], "ui-dist", "index.html"), "utf8"))
             .toBe("<html>Built from this Git checkout</html>");
+          expect(fs.readFileSync(path.join(args[1], "skills", "sample-skill", "SKILL.md"), "utf8"))
+            .toBe("# Sample skill\n");
         }
         fs.writeFileSync(path.join(args[args.indexOf("--pack-destination") + 1], `${packageName}-0.3.1.tgz`), "package");
         return { stdout: "", stderr: "" };
@@ -157,9 +164,15 @@ describe("managed install commands", () => {
         const packageJson = JSON.parse(fs.readFileSync(path.join(args[1], "package.json"), "utf8")) as { name: string; version: string };
         fs.mkdirSync(args[2], { recursive: true });
         if (packageJson.name === "@paperclipai/server") {
-          // Match the real bundler's declared-file copy: absent UI must fail
-          // before npm packs or activates an incomplete server payload.
+          // Match the real bundler's declared-file copy: absent generated files
+          // must fail before npm packs or activates an incomplete server payload.
+          const checkout = path.dirname(args[1]);
+          for (const adapterDir of ["packages/adapters/claude-local", "packages/adapters/codex-local"]) {
+            expect(fs.readFileSync(path.join(checkout, adapterDir, "skills", "sample-skill", "SKILL.md"), "utf8"))
+              .toBe("# Sample skill\n");
+          }
           fs.cpSync(path.join(args[1], "ui-dist"), path.join(args[2], "ui-dist"), { recursive: true });
+          fs.cpSync(path.join(args[1], "skills"), path.join(args[2], "skills"), { recursive: true });
         }
         fs.writeFileSync(path.join(args[2], "package.json"), JSON.stringify(packageJson));
         return { stdout: "", stderr: "" };
