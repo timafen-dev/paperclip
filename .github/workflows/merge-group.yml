@@ -1,0 +1,15 @@
+name: Merge queue
+
+on:
+  merge_group:
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  # Keep the required aggregate checks in the `ci / …` namespace while using
+  # the fork-local reusable workflow only for merge queue events.
+  ci:
+    uses: ./.github/workflows/pr-trusted.yml
