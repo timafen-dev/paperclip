@@ -226,16 +226,20 @@ describe("managed install commands", () => {
     const sha = "5".repeat(40);
     const checkoutCommands = createGitCheckoutRunCommand(sha, { bundledServer: true });
     let failedCheckout: string | undefined;
+    let failedCorepackHome: string | undefined;
     const runCommand = vi.fn(async (file: string, args: string[], options?: Parameters<CommandRunner>[2]) => {
       if (file === "corepack" && args.includes("prepare:ui-dist")) {
         failedCheckout = options?.cwd as string;
+        failedCorepackHome = options?.env?.COREPACK_HOME;
         throw new Error("UI build failed");
       }
       return checkoutCommands(file, args, options);
     });
     await expect(installCommand({ ref: sha, yes: true }, { runCommand })).rejects.toThrow("UI build failed");
     expect(failedCheckout).toBeDefined();
+    expect(failedCorepackHome).toBeDefined();
     expect(fs.existsSync(path.dirname(failedCheckout!))).toBe(false);
+    expect(fs.existsSync(failedCorepackHome!)).toBe(false);
     expect(fs.readdirSync(path.join(paths.installsRoot, "git"))).toEqual([previousSha.slice(0, 12)]);
     expect(runCommand.mock.calls.some(([file]) => file === "npm")).toBe(false);
     expect(fs.existsSync(paths.lockPath)).toBe(false);
@@ -260,6 +264,7 @@ describe("managed install commands", () => {
       const env = call[2]?.env;
       expect(env, `${call[0]} ${call[1].join(" ")} must run with an explicit env`).toBeDefined();
       expect(env, `${call[0]} ${call[1].join(" ")} must not inherit NODE_ENV`).not.toHaveProperty("NODE_ENV");
+      expect(env?.COREPACK_HOME, `${call[0]} ${call[1].join(" ")} must isolate Corepack state`).toContain("corepack-home");
     }
     const uiPackCall = buildCalls.find(([file, , options]) => file === "corepack" && options?.env?.PAPERCLIP_RELEASE_REUSE_UI_DIST === "1");
     expect(uiPackCall).toBeDefined();
