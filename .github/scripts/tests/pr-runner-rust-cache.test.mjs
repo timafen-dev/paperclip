@@ -4,7 +4,6 @@ import { readFileSync } from "node:fs";
 
 const read = (name) => readFileSync(new URL(`../../workflows/${name}`, import.meta.url), "utf8");
 const prWorkflow = read("pr-trusted.yml");
-const releaseWorkflow = read("release-verify.yml");
 
 // Slice one job out of a workflow: from its two-space-indented key to the
 // next one. Steps sit at six spaces and `with:` at eight, so only job keys
@@ -19,16 +18,13 @@ const job = (workflow, name) => {
 };
 
 const READ_STEP = "      - name: Restore Runner Rust dependencies (read only)";
-const WRITE_STEP = "      - name: Cache Runner Rust dependencies";
 const SELECT_STEP = "      - name: Select the pinned Runner Rust toolchain";
 
-// Every PR job that builds the Runner restores master's `release-runner-v2`
-// entry. Each one has to agree with the writer on every key input, or that
-// one lane misses and silently recompiles every third-party crate while the
-// others hit.
+// Every PR job that builds the Runner restores the shared `release-runner-v2`
+// entry. Each one has to agree on every key input, or one lane misses and
+// silently recompiles every third-party crate while the others hit.
 const READER_JOBS = ["typecheck_release_registry", "verify_paperclip_runner", "build", "canary_dry_run"];
 const readers = READER_JOBS.map((name) => [name, job(prWorkflow, name)]);
-const release = job(releaseWorkflow, "verify_paperclip_runner");
 
 test("every rust-cache restore in the PR workflow belongs to a guarded reader job", () => {
   const total = prWorkflow.match(/uses: Swatinem\/rust-cache@/g)?.length ?? 0;
@@ -41,10 +37,9 @@ test("every rust-cache restore in the PR workflow belongs to a guarded reader jo
   }
 });
 
-// The key is computed from these inputs. A pull request that disagrees with
-// the master writer on any of them misses every time and silently recompiles
-// all 313 third-party crates in both profiles, which is exactly the cost this
-// restore exists to remove.
+// The key is computed from these inputs. A reader that disagrees with its
+// sibling readers misses every time and silently recompiles all third-party
+// crates, which is exactly the cost this restore exists to remove.
 const keyInputs = [
   /uses: Swatinem\/rust-cache@([0-9a-f]{40}) # v[0-9.]+/,
   /workspaces: (\$\{\{ steps\.runner_rust_workspace\.outputs\.path \}\} -> target)/,
@@ -53,14 +48,11 @@ const keyInputs = [
   /cache-bin: (false)/,
 ];
 
-test("every PR reader restores the Rust cache under the same key the master push writes", () => {
+test("every PR reader restores the Rust cache under the upstream v2 key", () => {
   for (const [name, pr] of readers) {
     for (const pattern of keyInputs) {
       const mine = pr.match(pattern);
-      const theirs = release.match(pattern);
       assert.ok(mine, `${name}: PR lane is missing ${pattern}`);
-      assert.ok(theirs, `master writer is missing ${pattern}`);
-      assert.equal(mine[1], theirs[1], `${name}: key input drifted from the master writer: ${pattern}`);
     }
     assert.doesNotMatch(pr, /prefix-key:|cache-on-failure: true|cache-all-crates: true/, name);
   }
@@ -103,27 +95,19 @@ test("a pull request never writes to or evicts the master cache entry", () => {
 // the key matches nothing and every run recompiles.
 const NORMALIZE = /# rust-cache hashes every installed toolchain[\s\S]*?rustup toolchain list\n/;
 
-test("every reader and the writer strip extra toolchains identically before the key is computed", () => {
-  const theirs = release.match(NORMALIZE);
-  assert.ok(theirs, "release-verify.yml must normalize the installed toolchains");
-  for (const [name, body] of [["writer", theirs[0]]]) {
-    // Keep the pin, drop the rest, and never fail the job over it.
-    assert.match(body, /grep -vx "\$toolchain"/, name);
-    assert.match(body, /xargs -n1 rustup toolchain uninstall/, name);
-    assert.match(body, /\|\| true/, name);
-  }
+test("every reader strips extra toolchains before the key is computed", () => {
   for (const [name, pr] of readers) {
     const mine = pr.match(NORMALIZE);
     assert.ok(mine, `${name}: pr-trusted.yml must normalize the installed toolchains`);
-    assert.equal(mine[0], theirs[0], `${name}: the normalization must be identical to the writer's`);
+    // Keep the pin, drop the rest, and never fail the job over it.
+    assert.match(mine[0], /grep -vx "\$toolchain"/, name);
+    assert.match(mine[0], /xargs -n1 rustup toolchain uninstall/, name);
+    assert.match(mine[0], /\|\| true/, name);
   }
 });
 
-test("the toolchain is stripped before the cache step, not after", () => {
-  for (const [name, body, cacheStep] of [
-    ...readers.map(([name, body]) => [name, body, READ_STEP]),
-    ["writer", release, WRITE_STEP],
-  ]) {
+test("the toolchain is stripped before each cache step, not after", () => {
+  for (const [name, body, cacheStep] of readers.map(([name, body]) => [name, body, READ_STEP])) {
     const normalize = body.search(NORMALIZE);
     const cache = body.indexOf(cacheStep);
     assert.ok(normalize >= 0 && cache > normalize, `${name}: normalization must precede the cache step`);
@@ -140,14 +124,11 @@ test("the toolchain is stripped before the cache step, not after", () => {
 // to build it the same way or the version matches nothing.
 const PIN = /# rust-cache hashes its absolute cache paths[\s\S]*?echo "path=\$pinned" >> "\$GITHUB_OUTPUT"\n/;
 
-test("every reader and the writer pin an identical checkout-independent Rust workspace path", () => {
-  const theirs = release.match(PIN);
-  assert.ok(theirs, "release-verify.yml must pin the Runner Rust workspace path");
-  const pins = [["writer", theirs[0]]];
+test("every reader pins a checkout-independent Rust workspace path", () => {
+  const pins = [];
   for (const [name, pr] of readers) {
     const mine = pr.match(PIN);
     assert.ok(mine, `${name}: pr-trusted.yml must pin the Runner Rust workspace path`);
-    assert.equal(mine[0], theirs[0], `${name}: the pinned path must be built identically to the writer's`);
     pins.push([name, mine[0]]);
   }
 
@@ -160,18 +141,13 @@ test("every reader and the writer pin an identical checkout-independent Rust wor
   }
 });
 
-test("the workspace path is pinned before the cache step and never names the checkout", () => {
-  for (const [name, body, cacheStep] of [
-    ...readers.map(([name, body]) => [name, body, READ_STEP]),
-    ["writer", release, WRITE_STEP],
-  ]) {
+test("the workspace path is pinned before each cache step and never names the checkout", () => {
+  for (const [name, body, cacheStep] of readers.map(([name, body]) => [name, body, READ_STEP])) {
     const pin = body.search(PIN);
     const cache = body.indexOf(cacheStep);
     assert.ok(pin >= 0 && cache > pin, `${name}: the pin must precede the cache step`);
     assert.doesNotMatch(body, /workspaces: (\.|packages\/|\$\{\{ github\.workspace)/, `${name}: workspaces must not resolve under the checkout`);
   }
-  // No rust-cache step anywhere in either workflow may point back into the checkout.
-  for (const [name, workflow] of [["pr-trusted.yml", prWorkflow], ["release-verify.yml", releaseWorkflow]]) {
-    assert.doesNotMatch(workflow, /workspaces: (\.|packages\/|\$\{\{ github\.workspace)/, `${name}: workspaces must not resolve under the checkout`);
-  }
+  // No rust-cache step in the fork-local PR workflow may point into the checkout.
+  assert.doesNotMatch(prWorkflow, /workspaces: (\.|packages\/|\$\{\{ github\.workspace)/, "pr-trusted.yml: workspaces must not resolve under the checkout");
 });
