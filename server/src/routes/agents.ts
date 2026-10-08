@@ -22,7 +22,7 @@ import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import type { ChatChannelService } from "../services/chat-channels.js";
 import { activityLog, agents as agentsTable, chatConversations, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
-import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, not, or, sql } from "drizzle-orm";
 import { sha256Digest } from "../services/feedback-redaction.js";
 import {
   agentSkillSyncSchema,
@@ -7551,7 +7551,16 @@ export function agentRoutes(
         and(
           eq(heartbeatRuns.companyId, issue.companyId),
           inArray(heartbeatRuns.status, ["queued", "running"]),
-          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+          // The execution lock is the authoritative link for a run that was
+          // claimed by a legacy controller before its context snapshot was
+          // durably recorded. Keep every issue-run view on that exact link so
+          // it cannot look detached and trigger a competing recovery path.
+          or(
+            sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+            issue.executionRunId
+              ? eq(heartbeatRuns.id, issue.executionRunId)
+              : sql`false`,
+          ),
         ),
       )
       .orderBy(desc(heartbeatRuns.createdAt));
@@ -7571,7 +7580,12 @@ export function agentRoutes(
     if (!issue) return;
     const [run] = await db.select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, issue.companyId),
-      sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+      or(
+        sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+        issue.executionRunId
+          ? eq(heartbeatRuns.id, issue.executionRunId)
+          : sql`false`,
+      ),
     )).orderBy(sql`case when ${heartbeatRuns.id} = ${issue.executionRunId} then 0 when ${heartbeatRuns.status} = 'running' then 1 else 2 end`, desc(heartbeatRuns.createdAt)).limit(1);
     res.json(run ? { runId: run.id, agentId: run.agentId, recoveryAction: await issueRecoveryActionService(db).getActiveForIssue(issue.companyId, issue.id), execution: await executionProjectionForRun(db, issue.companyId, run.id) } : null);
   });
@@ -7589,14 +7603,21 @@ export function agentRoutes(
     if (!issue) return;
 
     let run = issue.executionRunId ? await heartbeat.getRunIssueSummary(issue.executionRunId) : null;
-    if (
-      run &&
-      (
+    if (run) {
+      const lockOwnerWithoutContext =
+        run.issueId == null && run.agentId === issue.assigneeAgentId;
+      if (
         (run.status !== "queued" && run.status !== "running") ||
-        run.issueId !== issue.id
-      )
-    ) {
-      run = null;
+        (run.issueId !== issue.id && !lockOwnerWithoutContext)
+      ) {
+        run = null;
+      } else if (lockOwnerWithoutContext) {
+        // The issue execution lock is authoritative for this exact run. Older
+        // legacy controllers can lose their context snapshot before they
+        // terminalize; keep that scoped owner observable instead of making the
+        // issue look detached and admitting a competing recovery run.
+        run = { ...run, issueId: issue.id };
+      }
     }
 
     if (!run && issue.assigneeAgentId && issue.status === "in_progress") {
