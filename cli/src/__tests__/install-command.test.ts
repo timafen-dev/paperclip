@@ -217,6 +217,12 @@ describe("managed install commands", () => {
     expect(runCommand.mock.calls.filter(([command, args]) => command === "corepack" && args.includes("pack"))).toHaveLength(3);
     expect(runCommand.mock.calls.filter(([command, args]) => command === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs"))).toHaveLength(1);
     expect(runCommand.mock.calls.filter(([command, args]) => command === "npm" && args[0] === "pack")).toHaveLength(2);
+    const versionCallIndex = runCommand.mock.calls.findIndex(([command, args]) =>
+      command === process.execPath && args[0]?.endsWith("release-package-map.mjs"));
+    const dependencyInstallCallIndex = runCommand.mock.calls.findIndex(([command, args]) =>
+      command === "corepack" && args[0] === "pnpm" && args[1] === "install");
+    expect(versionCallIndex).toBeGreaterThan(-1);
+    expect(dependencyInstallCallIndex).toBeGreaterThan(versionCallIndex);
     const installCall = runCommand.mock.calls.find(([command, args]) => command === "npm" && args[0] === "install");
     expect(installCall?.[1].filter((arg) => arg.endsWith(".tgz"))).toHaveLength(5);
   });
