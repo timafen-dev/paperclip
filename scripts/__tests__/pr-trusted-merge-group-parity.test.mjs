@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const trustedPath = path.join(repoRoot, ".github/workflows/pr-trusted.yml");
-const callerPath = path.join(repoRoot, ".github/workflows/pr.yml");
+const pullRequestCallerPath = path.join(repoRoot, ".github/workflows/pr.yml");
+const mergeGroupCallerPath = path.join(repoRoot, ".github/workflows/merge-group.yml");
 const upstreamMasterCommit = "0ac194450a48a407450921a16c3ef8684dcb85ca";
 const upstreamMasterBlob = "b87e5115b9cfbf616fd26784dd0a7430002d9ece";
 const sha = character => character.repeat(40);
@@ -55,10 +56,31 @@ test("patched reusable workflow restores exactly to the recorded upstream master
   assert.equal(gitBlobSha(restored), upstreamMasterBlob, `expected upstream master ${upstreamMasterCommit}`);
 });
 
-test("caller keeps pull requests on upstream master and routes only merge groups locally", () => {
-  const caller = readFileSync(callerPath, "utf8");
-  assert.match(caller, /pull_request:\n    if: github\.event_name == 'pull_request'[\s\S]*?uses: paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml@master/);
-  assert.match(caller, /merge_group:\n    if: github\.event_name == 'merge_group'\n    uses: \.\/\.github\/workflows\/pr-trusted\.yml/);
+function callerJobIds(workflow) {
+  const jobs = workflow.split("\njobs:\n")[1];
+  assert.ok(jobs, "workflow must define jobs");
+  return [...jobs.matchAll(/^  ([a-z0-9_-]+):\n/gm)].map((match) => match[1]);
+}
+
+test("separate callers preserve ci aggregate check names and event-specific routing", () => {
+  const pullRequestCaller = readFileSync(pullRequestCallerPath, "utf8");
+  const mergeGroupCaller = readFileSync(mergeGroupCallerPath, "utf8");
+
+  assert.match(pullRequestCaller, /on:\n  pull_request:\n/);
+  assert.doesNotMatch(pullRequestCaller, /merge_group:/);
+  assert.deepEqual(callerJobIds(pullRequestCaller), ["ci"]);
+  assert.match(pullRequestCaller, /ci:\n[\s\S]*?uses: paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml@master/);
+  assert.doesNotMatch(pullRequestCaller, /uses: \.\/\.github\/workflows\/pr-trusted\.yml/);
+
+  assert.match(mergeGroupCaller, /on:\n  merge_group:\n/);
+  assert.doesNotMatch(mergeGroupCaller, /pull_request:/);
+  assert.deepEqual(callerJobIds(mergeGroupCaller), ["ci"]);
+  assert.match(mergeGroupCaller, /ci:\n[\s\S]*?uses: \.\/\.github\/workflows\/pr-trusted\.yml/);
+  assert.doesNotMatch(mergeGroupCaller, /uses: paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml@master/);
+
+  // Reusable-workflow checks are namespaced by their caller job id. Both
+  // event-specific callers must therefore retain the active required contexts.
+  assert.deepEqual(["verify", "e2e"].map((check) => `ci / ${check}`), ["ci / verify", "ci / e2e"]);
 });
 
 test("both event shapes resolve valid exact diff inputs and non-colliding concurrency keys", () => {

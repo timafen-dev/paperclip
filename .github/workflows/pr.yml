@@ -2,7 +2,6 @@ name: PR
 
 on:
   pull_request:
-  merge_group:
 
 permissions:
   actions: read
@@ -10,11 +9,7 @@ permissions:
   pull-requests: read
 
 jobs:
-  pull_request:
-    if: github.event_name == 'pull_request'
+  ci:
     # Master requires CODEOWNERS review for .github/**, including this workflow.
     # The AWS runner group permits pr-trusted.yml@refs/heads/master.
     uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@master
-  merge_group:
-    if: github.event_name == 'merge_group'
-    uses: ./.github/workflows/pr-trusted.yml
