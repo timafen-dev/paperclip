@@ -74,6 +74,7 @@ import { runningProcesses } from "../adapters/index.ts";
 import {
   buildIssueBlockersResolvedWakeStateKey,
   buildIssueBlockersResolvedWakeStateKeyWithoutCycle,
+  findExistingIssueBlockersResolvedWakeForReadyState,
 } from "../services/issue-dependency-wakeups.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -932,6 +933,153 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       .from(agentWakeupRequests)
       .where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.idempotencyKey, cycleKey)));
     expect(cycleKeyWakes).toHaveLength(1);
+  });
+
+  it("does not re-emit a resolved-dependency wake after a checkout bounce reasserts the same blocked cycle", async () => {
+    const { companyId, agentId, blockedIssueId, blockerIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const originalBlockedTransitionAt = new Date("2026-08-04T12:00:00.000Z");
+    const unblockDescriptor = {
+      owner: { agentId },
+      action: "Wait for the existing dependency disposition",
+    };
+
+    await db
+      .update(issues)
+      .set({
+        blockedTransitionAt: originalBlockedTransitionAt,
+        unblockDescriptor,
+        updatedAt: originalBlockedTransitionAt,
+      })
+      .where(eq(issues.id, blockedIssueId));
+
+    const originalStateKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId: blockedIssueId,
+      blockerIssueIds: [blockerIssueId],
+      blockedTransitionAt: originalBlockedTransitionAt,
+    });
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: {
+        issueId: blockedIssueId,
+        resolvedBlockerIssueId: blockerIssueId,
+        blockerIssueIds: [blockerIssueId],
+      },
+      status: "completed",
+      requestedAt: new Date("2026-08-04T12:00:01.000Z"),
+      finishedAt: new Date("2026-08-04T12:00:02.000Z"),
+      idempotencyKey: originalStateKey,
+    });
+
+    const svc = issueService(db);
+    const checkedOut = await svc.checkout(
+      blockedIssueId,
+      agentId,
+      ["blocked"],
+      null,
+    );
+    expect(checkedOut.status).toBe("in_progress");
+    expect(checkedOut.blockedTransitionAt).toEqual(originalBlockedTransitionAt);
+
+    const reasserted = await svc.update(blockedIssueId, {
+      status: "blocked",
+      unblockDescriptor,
+    });
+    expect(reasserted?.blockedTransitionAt).toEqual(originalBlockedTransitionAt);
+
+    const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+
+    expect(result.healed).toBe(0);
+    expect(result.existingWakeSkipped).toBe(1);
+    const wakes = await db
+      .select({
+        id: agentWakeupRequests.id,
+        idempotencyKey: agentWakeupRequests.idempotencyKey,
+      })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.companyId, companyId),
+        eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+      ));
+    expect(wakes).toEqual([
+      expect.objectContaining({ idempotencyKey: originalStateKey }),
+    ]);
+  });
+
+  it("starts a new resolved-dependency wake cycle after an explicit unblock and re-block", async () => {
+    const { companyId, agentId, blockedIssueId, blockerIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const originalBlockedTransitionAt = new Date("2026-08-04T12:00:00.000Z");
+    await db
+      .update(issues)
+      .set({ blockedTransitionAt: originalBlockedTransitionAt })
+      .where(eq(issues.id, blockedIssueId));
+
+    const originalStateKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId: blockedIssueId,
+      blockerIssueIds: [blockerIssueId],
+      blockedTransitionAt: originalBlockedTransitionAt,
+    });
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: {
+        issueId: blockedIssueId,
+        resolvedBlockerIssueId: blockerIssueId,
+        blockerIssueIds: [blockerIssueId],
+      },
+      status: "completed",
+      requestedAt: new Date("2026-08-04T12:00:01.000Z"),
+      finishedAt: new Date("2026-08-04T12:00:02.000Z"),
+      idempotencyKey: originalStateKey,
+    });
+
+    const svc = issueService(db);
+    await svc.update(blockedIssueId, { status: "todo" });
+    await svc.checkout(blockedIssueId, agentId, ["todo"], null);
+    const reblocked = await svc.update(blockedIssueId, {
+      status: "blocked",
+      unblockDescriptor: {
+        owner: { agentId },
+        action: "Wait for the new blocking cycle",
+      },
+    });
+
+    expect(reblocked?.blockedTransitionAt).not.toBeNull();
+    expect(reblocked?.blockedTransitionAt).not.toEqual(originalBlockedTransitionAt);
+
+    const newStateKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId: blockedIssueId,
+      blockerIssueIds: [blockerIssueId],
+      blockedTransitionAt: reblocked?.blockedTransitionAt,
+    });
+    expect(newStateKey).not.toBe(originalStateKey);
+    await expect(
+      findExistingIssueBlockersResolvedWakeForReadyState(db, {
+        companyId,
+        dependentIssueId: blockedIssueId,
+        blockerIssueIds: [blockerIssueId],
+        blockedTransitionAt: reblocked?.blockedTransitionAt,
+      }),
+    ).resolves.toBeNull();
+    expect(
+      await db
+        .select({ idempotencyKey: agentWakeupRequests.idempotencyKey })
+        .from(agentWakeupRequests)
+        .where(and(
+          eq(agentWakeupRequests.companyId, companyId),
+          eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+        )),
+    ).toEqual(
+      [expect.objectContaining({ idempotencyKey: originalStateKey })],
+    );
   });
 
   it("does not re-heal when a completed old-key wake is from the current blocked cycle", async () => {

@@ -9,6 +9,7 @@ import { executionProjectionsForRuns } from "./execution-projection.js";
 import type { ExecutionProjection } from "@paperclipai/shared";
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   and,
   asc,
@@ -10701,8 +10702,29 @@ export function issueService(db: Db) {
         updatedAt: new Date(),
       };
       if (existing.status !== "blocked" && issueData.status === "blocked") {
-        patch.blockedTransitionAt = patch.updatedAt;
-        patch.blockedOwnerNotifiedAt = null;
+        // Checkout temporarily promotes a blocked issue to in_progress without
+        // clearing its blocked-cycle stamp. Reasserting blocked after that
+        // bounce continues the same cycle, so keep the stamp instead of minting
+        // another dependency wake key. A real unblock clears the stamp below,
+        // so a later re-block still starts a fresh cycle.
+        if (
+          existing.status === "in_progress" &&
+          existing.blockedTransitionAt
+        ) {
+          patch.blockedTransitionAt = existing.blockedTransitionAt;
+          if (
+            issueData.unblockDescriptor !== undefined &&
+            !isDeepStrictEqual(
+              issueData.unblockDescriptor,
+              existing.unblockDescriptor,
+            )
+          ) {
+            patch.blockedOwnerNotifiedAt = null;
+          }
+        } else {
+          patch.blockedTransitionAt = patch.updatedAt;
+          patch.blockedOwnerNotifiedAt = null;
+        }
       } else if (
         existing.status === "blocked" &&
         issueData.status &&
