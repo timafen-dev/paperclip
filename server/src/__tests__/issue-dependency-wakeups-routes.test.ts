@@ -26,6 +26,7 @@ const mockIssueService = vi.hoisted(() => ({
   getComment: vi.fn(),
   getCommentCursor: vi.fn(),
   getRelationSummaries: vi.fn(),
+  checkout: vi.fn(),
   update: vi.fn(),
   getDependencyReadiness: vi.fn(),
   listWakeableBlockedDependents: vi.fn(),
@@ -427,6 +428,92 @@ describe("issue dependency wakeups in issue routes", () => {
       ...overrides,
     };
   }
+
+  it("preserves the blocked wake cycle when checkout is followed by the same descriptor PATCH", async () => {
+    const issueId = "11111111-1111-4111-8111-111111111111";
+    const agentId = "22222222-2222-4222-8222-222222222222";
+    const blockerIssueId = "33333333-3333-4333-8333-333333333333";
+    const blockedTransitionAt = new Date("2026-08-04T12:00:00.000Z");
+    const unblockDescriptor = {
+      owner: "board",
+      action: "Wait for the existing dependency disposition",
+    };
+    let currentIssue = issueRecord({
+      id: issueId,
+      status: "blocked",
+      assigneeAgentId: agentId,
+      blockedTransitionAt,
+      unblockDescriptor,
+    });
+    mockIssueService.getById.mockImplementation(async () => currentIssue);
+    mockIssueService.checkout.mockImplementation(async () => {
+      currentIssue = { ...currentIssue, status: "in_progress" };
+      return currentIssue;
+    });
+    mockIssueService.update.mockImplementation(async (
+      _id: string,
+      update: Record<string, unknown>,
+    ) => {
+      currentIssue = { ...currentIssue, ...update };
+      return currentIssue;
+    });
+    mockIssueService.getDependencyReadiness.mockResolvedValue({
+      issueId,
+      blockerIssueIds: [blockerIssueId],
+      unresolvedBlockerIssueIds: [],
+      unresolvedBlockerCount: 0,
+      pendingFinalizeBlockerIssueIds: [],
+      allBlockersDone: true,
+      isDependencyReady: true,
+    });
+    mockFindExistingIssueBlockersResolvedWakeForReadyState.mockResolvedValue({
+      id: "already-serviced-wake",
+    });
+
+    const app = await createApp();
+    const checkout = await request(app)
+      .post(`/api/issues/${issueId}/checkout`)
+      .send({ agentId, expectedStatuses: ["blocked"] });
+    expect(checkout.status, JSON.stringify(checkout.body)).toBe(200);
+    expect(checkout.body).toMatchObject({
+      status: "in_progress",
+      blockedTransitionAt: blockedTransitionAt.toISOString(),
+      unblockDescriptor,
+    });
+
+    mockWakeup.mockClear();
+    const reasserted = await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "blocked", unblockDescriptor });
+
+    expect(reasserted.status, JSON.stringify(reasserted.body)).toBe(200);
+    expect(reasserted.body).toMatchObject({
+      status: "blocked",
+      blockedTransitionAt: blockedTransitionAt.toISOString(),
+      unblockDescriptor,
+    });
+    expect(mockIssueService.update.mock.calls.at(-1)?.[1]).toMatchObject({
+      status: "blocked",
+      unblockDescriptor,
+    });
+    await vi.waitFor(() => {
+      expect(mockFindExistingIssueBlockersResolvedWakeForReadyState).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          companyId: "company-1",
+          dependentIssueId: issueId,
+          blockerIssueIds: [blockerIssueId],
+          blockedTransitionAt,
+        }),
+      );
+    });
+    expect(mockWakeup).not.toHaveBeenCalledWith(
+      agentId,
+      expect.objectContaining({
+        reason: "issue_blockers_resolved",
+      }),
+    );
+  });
 
   it("wakes a Release-like dependent after a terminal reset using the current blocked cycle", async () => {
     const reviewIssueId = "11111111-1111-4111-8111-111111111111";
