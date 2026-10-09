@@ -116,6 +116,22 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
     expect(existing?.id).toBe("wake-cycle");
   });
 
+  it("suppresses a coalesced wake on the cycle-aware state key", async () => {
+    const cycleKey = buildIssueBlockersResolvedWakeStateKey(readyState);
+    const existing = await findExistingIssueBlockersResolvedWakeForReadyState(
+      dbWithWakes([
+        {
+          id: "wake-coalesced",
+          status: "coalesced",
+          idempotencyKey: cycleKey,
+          requestedAt: secondCycle,
+        },
+      ]),
+      readyState,
+    );
+    expect(existing?.id).toBe("wake-coalesced");
+  });
+
   it("does not let a completed old-key wake from a previous blocked cycle suppress", async () => {
     const oldKey = buildIssueBlockersResolvedWakeStateKeyWithoutCycle({
       dependentIssueId,

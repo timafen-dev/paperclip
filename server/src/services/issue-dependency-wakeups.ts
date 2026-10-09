@@ -14,6 +14,7 @@ const IDEMPOTENT_DEPENDENCY_WAKE_STATUSES = [
   "deferred_issue_execution",
   "claimed",
   "completed",
+  "coalesced",
 ] as const;
 
 // A wake counts as "still in flight" for these statuses. The `completed` status
