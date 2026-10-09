@@ -355,7 +355,7 @@ async function runHardenedReadOnlyGit(
  * timeout, a permissions error, a corrupt repository), which must still
  * surface as a failure and never look like "no Git tree here".
  */
-function isNotAGitRepositoryError(error: unknown): boolean {
+export function isNotAGitRepositoryError(error: unknown): boolean {
   // The host scheduler keeps bounded subprocess diagnostics under details.
   // Only a completed Git exit may establish that no repository exists.
   if (error && typeof error === "object" && "code" in error &&

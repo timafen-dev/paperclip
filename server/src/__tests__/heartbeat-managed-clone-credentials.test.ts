@@ -38,6 +38,24 @@ async function createLocalSourceRepo() {
 }
 
 describe("ensureManagedProjectWorkspace clone credentials", () => {
+  it("materializes attached repositories for a configured non-Git workspace", async () => {
+    const anchor = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-local-workspace-"));
+    const attached = await createLocalSourceRepo();
+    try {
+      const [repo] = await prepareProjectRepositoryWorkspaces({
+        cwd: anchor,
+        anchorRepoUrl: null,
+        workspaces: [{ id: "attached", cwd: attached, repoUrl: attached, repoRef: null }],
+      });
+
+      expect(repo!.workspaceId).toBe("attached");
+      expect(await fs.readFile(path.join(repo!.cwd, "README.md"), "utf8")).toBe("hello\n");
+      await expect(fs.lstat(path.join(anchor, ".git"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await Promise.all([anchor, attached].map((cwd) => fs.rm(cwd, { recursive: true, force: true })));
+    }
+  });
+
   it("materializes every repository-only project row inside the task workspace and reuses local edits", async () => {
     const first = await createLocalSourceRepo();
     const second = await createLocalSourceRepo();
