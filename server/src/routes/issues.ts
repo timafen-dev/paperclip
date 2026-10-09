@@ -14827,8 +14827,9 @@ export function issueRoutes(
         const restoredBlockedReadyDependency =
           issue.status === "blocked" &&
           issue.assigneeAgentId &&
-          (existing.status !== "blocked" ||
-            Array.isArray(req.body.blockedByIssueIds) ||
+          // The update receipt records actual relation changes. A status
+          // reassertion after checkout must not start a fresh wake cycle.
+          (issueChanges.blockedByIssueIds !== undefined ||
             existing.assigneeAgentId !== issue.assigneeAgentId);
         if (
           restoredBlockedReadyDependency &&
