@@ -455,27 +455,6 @@ npx paperclipai issue recovery-actions <issue-id>
 npx paperclipai issue recovery:resolve <issue-id> --outcome restored --source-issue-status todo
 ```
 
-For a terminal legacy execution that requires reconciliation, a board operator
-uses `POST /api/issues/{issueId}/recovery-actions/resolve` with
-`outcome: "restored"`, `sourceIssueStatus: "todo"`, and
-`executionReconciliation` (`runId`, `providerStopped: true`, `actionOutcome`,
-and `outcomeEvidence`). The route rejects a live provider, coordinator,
-environment lease, changed owner, or run mismatch. When the active projection is
-empty because the automatic no-replay action is settled, the same typed request
-finds that eligible issue action without an `actionId`; it does not affect other
-issues or agent sessions. A successful restore returns `{ issue, recoveryAction }`.
-If that response is lost, the identical no-`actionId` request returns the same
-readback without reopening the action or scheduling another continuation. The
-retry must keep all four reconciliation fields identical (`runId`,
-`providerStopped`, `actionOutcome`, and `outcomeEvidence`); a different receipt,
-changed owner, non-`todo` issue, or live recovery action returns HTTP 404. The
-no-`actionId` form is only for an eligible settled action and its board-only
-readback; a live action must be resolved with its explicit `actionId`.
-initial restore is refused with HTTP 409 for a live provider, coordinator,
-environment lease, owner change, or run mismatch. An identical readback does
-not repeat those checks because it makes no mutation. This is an issue-scoped
-readback, not a session reset or a retry of a neighbouring execution.
-
 ```sh
 npx paperclipai issue documents <issue-id> [--include-system]
 npx paperclipai issue document:get <issue-id> <key>

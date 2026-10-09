@@ -22,7 +22,7 @@ import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import type { ChatChannelService } from "../services/chat-channels.js";
 import { activityLog, agents as agentsTable, chatConversations, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";
-import { and, desc, eq, inArray, not, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
 import { sha256Digest } from "../services/feedback-redaction.js";
 import {
   agentSkillSyncSchema,
@@ -2526,23 +2526,6 @@ export function agentRoutes(
     if (asEnvBindingString(value)) return true;
     const record = asRecord(value);
     return record?.type === "secret_ref" && typeof record.secretId === "string";
-  }
-
-  function mergeAdapterConfigPatch(
-    existingAdapterConfig: Record<string, unknown>,
-    requestedAdapterConfig: Record<string, unknown>,
-  ): Record<string, unknown> {
-    const existingEnv = asRecord(existingAdapterConfig.env);
-    const requestedEnv = asRecord(requestedAdapterConfig.env);
-    return {
-      ...existingAdapterConfig,
-      ...requestedAdapterConfig,
-      // `adapterConfig` is a partial PATCH by default. Its env map is also
-      // partial: a scoped binding must not replace unrelated entries such as
-      // CODEX_HOME. Callers that need to replace the complete map opt into
-      // replaceAdapterConfig, which deliberately bypasses this merge.
-      ...(existingEnv && requestedEnv ? { env: { ...existingEnv, ...requestedEnv } } : {}),
-    };
   }
 
   // codex_local agents inherit whatever Codex login is already on the device
@@ -5494,7 +5477,7 @@ export function agentRoutes(
         ? restoreRedactedAgentEnv(requestedAdapterConfig, existingAdapterConfig)
         : changingAdapterType ? {} : existingAdapterConfig;
       if (requestedAdapterConfig && !changingAdapterType && !replaceAdapterConfig) {
-        rawEffectiveAdapterConfig = mergeAdapterConfigPatch(existingAdapterConfig, rawEffectiveAdapterConfig);
+        rawEffectiveAdapterConfig = { ...existingAdapterConfig, ...rawEffectiveAdapterConfig };
       }
       if (changingAdapterType) {
         // Preserve adapter-agnostic keys (env, cwd, etc.) from the existing config
@@ -5502,20 +5485,6 @@ export function agentRoutes(
         // adapterConfig but omits these keys would silently drop them.
         for (const key of ADAPTER_AGNOSTIC_KEYS) {
           if (KNOWN_INSTRUCTIONS_BUNDLE_KEY_SET.has(key)) continue;
-          if (key === "env" && !replaceAdapterConfig) {
-            const existingEnv = asRecord(existingAdapterConfig.env);
-            const requestedEnv = asRecord(rawEffectiveAdapterConfig.env);
-            // An explicitly empty env map is a request to clear inherited
-            // bindings during the transition. Only merge a scoped update that
-            // names at least one binding.
-            if (existingEnv && requestedEnv && Object.keys(requestedEnv).length > 0) {
-              rawEffectiveAdapterConfig = {
-                ...rawEffectiveAdapterConfig,
-                env: { ...existingEnv, ...requestedEnv },
-              };
-              continue;
-            }
-          }
           if (rawEffectiveAdapterConfig[key] === undefined && existingAdapterConfig[key] !== undefined) {
             rawEffectiveAdapterConfig = { ...rawEffectiveAdapterConfig, [key]: existingAdapterConfig[key] };
           }
@@ -7582,16 +7551,7 @@ export function agentRoutes(
         and(
           eq(heartbeatRuns.companyId, issue.companyId),
           inArray(heartbeatRuns.status, ["queued", "running"]),
-          // The execution lock is the authoritative link for a run that was
-          // claimed by a legacy controller before its context snapshot was
-          // durably recorded. Keep every issue-run view on that exact link so
-          // it cannot look detached and trigger a competing recovery path.
-          or(
-            sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
-            issue.executionRunId
-              ? eq(heartbeatRuns.id, issue.executionRunId)
-              : sql`false`,
-          ),
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
         ),
       )
       .orderBy(desc(heartbeatRuns.createdAt));
@@ -7611,12 +7571,7 @@ export function agentRoutes(
     if (!issue) return;
     const [run] = await db.select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, issue.companyId),
-      or(
-        sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
-        issue.executionRunId
-          ? eq(heartbeatRuns.id, issue.executionRunId)
-          : sql`false`,
-      ),
+      sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
     )).orderBy(sql`case when ${heartbeatRuns.id} = ${issue.executionRunId} then 0 when ${heartbeatRuns.status} = 'running' then 1 else 2 end`, desc(heartbeatRuns.createdAt)).limit(1);
     res.json(run ? { runId: run.id, agentId: run.agentId, recoveryAction: await issueRecoveryActionService(db).getActiveForIssue(issue.companyId, issue.id), execution: await executionProjectionForRun(db, issue.companyId, run.id) } : null);
   });
@@ -7634,21 +7589,14 @@ export function agentRoutes(
     if (!issue) return;
 
     let run = issue.executionRunId ? await heartbeat.getRunIssueSummary(issue.executionRunId) : null;
-    if (run) {
-      const lockOwnerWithoutContext =
-        run.issueId == null && run.agentId === issue.assigneeAgentId;
-      if (
+    if (
+      run &&
+      (
         (run.status !== "queued" && run.status !== "running") ||
-        (run.issueId !== issue.id && !lockOwnerWithoutContext)
-      ) {
-        run = null;
-      } else if (lockOwnerWithoutContext) {
-        // The issue execution lock is authoritative for this exact run. Older
-        // legacy controllers can lose their context snapshot before they
-        // terminalize; keep that scoped owner observable instead of making the
-        // issue look detached and admitting a competing recovery run.
-        run = { ...run, issueId: issue.id };
-      }
+        run.issueId !== issue.id
+      )
+    ) {
+      run = null;
     }
 
     if (!run && issue.assigneeAgentId && issue.status === "in_progress") {
