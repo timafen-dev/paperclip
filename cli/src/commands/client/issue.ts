@@ -19,6 +19,7 @@ import {
   releaseIssueTreeHoldSchema,
   respondIssueThreadInteractionSchema,
   resolveIssueRecoveryActionSchema,
+  reconcileLegacyExecutionSchema,
   restoreIssueDocumentRevisionSchema,
   updateIssueSchema,
   updateIssueWorkProductSchema,
@@ -510,6 +511,27 @@ export function registerIssueCommands(program: Command): void {
         try {
           const ctx = resolveCommandContext(opts);
           const result = await ctx.api.get(apiPath`/api/issues/${issueId}/recovery-actions`);
+          printOutput(result, { json: ctx.json });
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  addCommonClientOptions(
+    issue
+      .command("recovery:reconcile-legacy")
+      .description("Create the explicit no-replay recovery action for one legacy issue run")
+      .argument("<issueId>", "Issue ID")
+      .argument("<legacyRunId>", "Exact legacy run ID")
+      .action(async (issueId: string, legacyRunId: string, opts: BaseClientOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+          const payload = reconcileLegacyExecutionSchema.parse({ runId: legacyRunId });
+          const result = await ctx.api.post(
+            apiPath`/api/issues/${issueId}/recovery-actions/reconcile-legacy`,
+            payload,
+          );
           printOutput(result, { json: ctx.json });
         } catch (err) {
           handleCommandError(err);

@@ -6,16 +6,213 @@ import { normalizeMaxTurnStopReason } from "./heartbeat-stop-metadata.js";
 import { claimedAdapterType, hasConversationContinuationPolicy } from "./conversation-continuation.js";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
-import { environmentLeases, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
+import {
+  environmentLeases,
+  executionWorkspaces,
+  heartbeatRuns,
+  issueRecoveryActions,
+  issues,
+  nativeRunFinalizations,
+  type Db,
+} from "@paperclipai/db";
 import { issueRecoveryActionService } from "./issue-recovery-actions.js";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { logActivity } from "./activity-log.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
 import { issueService } from "./issues.js";
+import { conflict } from "../errors.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 export const LEGACY_RECOVERY_CAUSE = "legacy_execution_requires_reconciliation";
+
+function processEvidence(pid: number | null) {
+  if (!pid) return { state: "not_recorded" as const, pid: null };
+  try {
+    process.kill(pid, 0);
+    return { state: "live" as const, pid };
+  } catch (error) {
+    return {
+      state: (error as NodeJS.ErrnoException).code === "ESRCH"
+        ? "not_running" as const
+        : "unverifiable" as const,
+      pid,
+    };
+  }
+}
+
+/**
+ * Create the one explicit, source-scoped recovery action missing from older
+ * terminal runs.  It only records bounded evidence and never creates a wake
+ * or successor execution; resolution repeats the safety checks before a
+ * continuation can be delivered.
+ */
+export async function materializeLegacyExecutionReconciliation(input: {
+  db: Db;
+  companyId: string;
+  sourceIssueId: string;
+  runId: string;
+}) {
+  return input.db.transaction(async (tx) => {
+    await tx.execute(
+      sql`select set_config('statement_timeout', '15000', true), set_config('lock_timeout', '1000', true)`,
+    );
+    const [task] = await tx
+      .select()
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, input.companyId),
+          eq(issues.id, input.sourceIssueId),
+        ),
+      )
+      .for("update");
+    if (!task) return null;
+
+    const [run] = await tx
+      .select()
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, input.companyId),
+          eq(heartbeatRuns.id, input.runId),
+        ),
+      )
+      .for("update");
+    if (
+      !run ||
+      (run.nativeIssueId ?? run.contextSnapshot?.issueId) !== task.id ||
+      !legacyExecutionNeedsReconciliation(run)
+    ) {
+      return null;
+    }
+
+    const [coordinator] = await tx
+      .select()
+      .from(nativeRunFinalizations)
+      .where(
+        and(
+          eq(nativeRunFinalizations.companyId, input.companyId),
+          eq(nativeRunFinalizations.runId, run.id),
+        ),
+      )
+      .for("update");
+    const successors = await tx
+      .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, input.companyId),
+          eq(heartbeatRuns.retryOfRunId, run.id),
+          inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+        ),
+      )
+      .limit(2);
+    const leases = await tx
+      .select({ id: environmentLeases.id, provider: environmentLeases.provider })
+      .from(environmentLeases)
+      .where(
+        and(
+          eq(environmentLeases.companyId, input.companyId),
+          eq(environmentLeases.heartbeatRunId, run.id),
+          isNull(environmentLeases.releasedAt),
+        ),
+      )
+      .limit(4);
+    const [workspace] = task.executionWorkspaceId
+      ? await tx
+          .select({
+            id: executionWorkspaces.id,
+            status: executionWorkspaces.status,
+            branchName: executionWorkspaces.branchName,
+            providerType: executionWorkspaces.providerType,
+          })
+          .from(executionWorkspaces)
+          .where(
+            and(
+              eq(executionWorkspaces.companyId, input.companyId),
+              eq(executionWorkspaces.id, task.executionWorkspaceId),
+            ),
+          )
+          .limit(1)
+      : [];
+
+    const fingerprint = `legacy-execution:${run.id}`;
+    const recoveryActions = issueRecoveryActionService(tx as unknown as Db);
+    const active = await recoveryActions.getActiveForIssue(
+      input.companyId,
+      task.id,
+      tx,
+    );
+    // This command is deliberately exact-run only.  It must never overwrite a
+    // different incident already owned by this issue.
+    if (
+      active &&
+      (active.cause !== LEGACY_RECOVERY_CAUSE || active.fingerprint !== fingerprint)
+    ) {
+      throw conflict("A different active recovery action already owns this issue.");
+    }
+
+    return recoveryActions.upsertSourceScoped({
+      companyId: input.companyId,
+      sourceIssueId: task.id,
+      kind: "active_run_watchdog",
+      ownerType: "board",
+      returnOwnerAgentId: task.assigneeAgentId,
+      cause: LEGACY_RECOVERY_CAUSE,
+      fingerprint,
+      evidence: {
+        runId: run.id,
+        legacyReconciliation: {
+          version: 1,
+          recordedAt: new Date().toISOString(),
+          run: {
+            status: run.status,
+            runtimeMode: run.runtimeMode,
+            errorCode: run.errorCode,
+            issueId: task.id,
+          },
+          provider: {
+            process: processEvidence(run.processPid),
+            coordinator: coordinator
+              ? {
+                  phase: coordinator.phase,
+                  leaseOwnerPresent: Boolean(coordinator.leaseOwner),
+                  successorRunId:
+                    typeof coordinator.failureDetail?.successorRunId === "string"
+                      ? coordinator.failureDetail.successorRunId
+                      : null,
+                }
+              : null,
+            liveSuccessorRunIds: successors.map((successor) => successor.id),
+          },
+          workspace: workspace
+            ? {
+                id: workspace.id,
+                status: workspace.status,
+                branchName: workspace.branchName,
+                providerType: workspace.providerType,
+              }
+            : {
+                id: task.executionWorkspaceId,
+                status: task.executionWorkspaceId ? "missing" : "not_recorded",
+                projectWorkspaceId: task.projectWorkspaceId,
+              },
+          leases: {
+            activeCount: leases.length,
+            activeLeaseIds: leases.map((lease) => lease.id),
+            providers: leases.map((lease) => lease.provider),
+          },
+        },
+      },
+      nextAction:
+        "Inspect the recorded provider, workspace, and lease evidence for this exact stopped run; record verified outcomes before continuing. No provider work has been replayed.",
+      wakePolicy: null,
+      monitorPolicy: null,
+      maxAttempts: null,
+    });
+  });
+}
 
 /** Error families describe availability, not whether earlier actions happened. */
 export function legacyExecutionNeedsReconciliation(

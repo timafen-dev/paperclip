@@ -229,6 +229,7 @@ import {
   updateDocumentAnnotationThreadSchema,
   // Issue recovery and decomposition
   createAcceptedPlanDecompositionSchema,
+  reconcileLegacyExecutionSchema,
   resolveIssueRecoveryActionSchema,
   retryWorkspaceExportSchema,
   cancelIssueThreadInteractionSchema,
@@ -10374,6 +10375,14 @@ registerCurrentRoute({
   summary: "Retry only workspace export for a repaired accepted native result",
   body: retryWorkspaceExportSchema,
   responses: { 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/issues/{id}/recovery-actions/reconcile-legacy",
+  tags: ["issues"],
+  summary: "Materialize an exact legacy execution recovery action",
+  body: reconcileLegacyExecutionSchema,
 });
 
 registerCurrentRoute({

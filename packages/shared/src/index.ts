@@ -1991,6 +1991,7 @@ export {
   issueExecutionPolicySchema,
   issueExecutionMonitorPolicySchema,
   issueExecutionStateSchema,
+  reconcileLegacyExecutionSchema,
   resolveIssueRecoveryActionSchema,
   retryWorkspaceExportSchema,
   issueReviewRequestSchema,

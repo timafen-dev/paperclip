@@ -13,11 +13,16 @@ import { queuedInteractionId, readQueuedInteractionResponse, hasQueuedInteractio
 import { deliverConversationComments, isConversation } from "../services/agent-conversations.js";
 import { issueRecoveryActionReadModel } from "../services/issue-recovery-actions.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
-import { requiresExecutionReconciliation } from "@paperclipai/shared";
+import {
+  extractIssueReferenceIdentifiers,
+  reconcileLegacyExecutionSchema,
+  requiresExecutionReconciliation,
+} from "@paperclipai/shared";
 import {
   validateExecutionReconciliation,
   markExecutionReconciliation,
 } from "../services/execution-recovery-resolution.js";
+import { materializeLegacyExecutionReconciliation } from "../services/legacy-execution-recovery.js";
 import {
   storedSteeringAcknowledgement,
   reconcileSteeredIdentity,
@@ -9393,6 +9398,66 @@ export function issueRoutes(
       actorId: getActorInfo(req).actorId, environmentRuntime });
     res.status(202).json(receipt);
   });
+
+  router.post(
+    "/issues/:id/recovery-actions/reconcile-legacy",
+    validate(reconcileLegacyExecutionSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const issue = await getAccessibleResource(
+        req,
+        res,
+        svc.getById(id),
+        "Issue not found",
+      );
+      if (!issue) return;
+      if (!(await assertIssueReadAllowed(req, res, issue))) return;
+      if (
+        await assertLowTrustControlPlaneDenied(req, res, issue.companyId, issue)
+      )
+        return;
+      if (req.actor.type === "agent") {
+        const boundaryDecision = await decideIssueAccess(req, issue, "issue:mutate");
+        if (!boundaryDecision.allowed) {
+          await denyIssueWrite(
+            req,
+            res,
+            issue,
+            issueWriteDenialCodeForDecision(boundaryDecision),
+          );
+          return;
+        }
+        if (!requireAgentRunId(req, res)) return;
+        if (!(await assertCrossIssueInfluenceWithinRunCap(req, res, issue, "update"))) return;
+      }
+
+      const action = await materializeLegacyExecutionReconciliation({
+        db,
+        companyId: issue.companyId,
+        sourceIssueId: issue.id,
+        runId: req.body.runId,
+      });
+      if (!action) {
+        throw notFound(
+          "The specified run is not a legacy execution hold for this issue.",
+        );
+      }
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
+        action: "issue.legacy_execution_reconciliation_materialized",
+        entityType: "issue",
+        entityId: issue.id,
+        details: { recoveryActionId: action.id, sourceRunId: req.body.runId },
+      });
+      res.status(201).json({ action });
+    },
+  );
 
   router.post(
     "/issues/:id/recovery-actions/resolve",

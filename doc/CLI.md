@@ -452,6 +452,7 @@ npx paperclipai issue unread <issue-id>
 npx paperclipai issue archive <issue-id>
 npx paperclipai issue unarchive <issue-id>
 npx paperclipai issue recovery-actions <issue-id>
+npx paperclipai issue recovery:reconcile-legacy <issue-id> <legacy-run-id>
 npx paperclipai issue recovery:resolve <issue-id> --outcome restored --source-issue-status todo
 ```
 

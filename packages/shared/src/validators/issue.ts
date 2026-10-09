@@ -562,6 +562,21 @@ export const retryWorkspaceExportSchema = z.object({
   repairNote: z.string().trim().min(20).max(12000),
 }).strict();
 
+/**
+ * Materializes the operator-owned hold for one historical execution.  This is
+ * intentionally separate from resolution: it records an inspectable action,
+ * but cannot continue, replay, or wake the provider.
+ */
+export const reconcileLegacyExecutionSchema = z
+  .object({
+    runId: z.string().guid(),
+  })
+  .strict();
+
+export type ReconcileLegacyExecution = z.infer<
+  typeof reconcileLegacyExecutionSchema
+>;
+
 export const resolveIssueRecoveryActionSchema = z
   .object({
     executionReconciliation: z

@@ -98,6 +98,10 @@ describe("issue subresource commands", () => {
     await run(["issue", "unarchive", ISSUE_ID]);
     await run(["issue", "recovery-actions", ISSUE_ID]);
     await run([
+      "issue", "recovery:reconcile-legacy", ISSUE_ID,
+      COMMENT_ID,
+    ]);
+    await run([
       "issue", "recovery:resolve", ISSUE_ID,
       "--outcome", "restored",
       "--source-issue-status", "todo",
@@ -116,8 +120,12 @@ describe("issue subresource commands", () => {
       ["POST", `http://localhost:3100/api/issues/${ISSUE_ID}/inbox-archive`],
       ["DELETE", `http://localhost:3100/api/issues/${ISSUE_ID}/inbox-archive`],
       ["GET", `http://localhost:3100/api/issues/${ISSUE_ID}/recovery-actions`],
+      ["POST", `http://localhost:3100/api/issues/${ISSUE_ID}/recovery-actions/reconcile-legacy`],
       ["POST", `http://localhost:3100/api/issues/${ISSUE_ID}/recovery-actions/resolve`],
     ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[11]?.[1]?.body))).toEqual({
+      runId: COMMENT_ID,
+    });
   });
 
   it("wraps document and work product endpoints", async () => {

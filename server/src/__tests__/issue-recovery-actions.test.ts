@@ -1743,6 +1743,110 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(list.body.actions).toHaveLength(1);
   });
 
+  it("materializes an exact legacy hold without touching an adjacent issue or run", async () => {
+    const { companyId, coderId, sourceIssueId, prefix } = await seedCompany();
+    const sourceRunId = randomUUID();
+    const adjacentIssueId = randomUUID();
+    const adjacentRunId = randomUUID();
+    await db.insert(issues).values({
+      id: adjacentIssueId,
+      companyId,
+      title: "Independent legacy hold",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: coderId,
+      issueNumber: 2,
+      identifier: `${prefix}-2`,
+    });
+    await db.insert(heartbeatRuns).values([
+      {
+        id: sourceRunId,
+        companyId,
+        agentId: coderId,
+        invocationSource: "manual",
+        status: "failed",
+        runtimeMode: "legacy",
+        errorCode: "adapter_lost",
+        contextSnapshot: { issueId: sourceIssueId },
+      },
+      {
+        id: adjacentRunId,
+        companyId,
+        agentId: coderId,
+        invocationSource: "manual",
+        status: "failed",
+        runtimeMode: "legacy",
+        errorCode: "adapter_lost",
+        contextSnapshot: { issueId: adjacentIssueId },
+      },
+    ]);
+    // An unreleased lease is contradictory evidence: materialization records
+    // it for the board but cannot resume or dispatch anything.
+    await db.insert(environmentLeases).values({
+      companyId,
+      issueId: sourceIssueId,
+      heartbeatRunId: sourceRunId,
+      status: "active",
+      provider: "sandbox",
+      providerLeaseId: "legacy-source-lease",
+    });
+    const [adjacentIssueBefore] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, adjacentIssueId));
+    const [adjacentRunBefore] = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, adjacentRunId));
+    const runsBefore = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns);
+
+    const app = createApp();
+    const response = await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/reconcile-legacy`)
+      .send({ runId: sourceRunId })
+      .expect(201);
+
+    expect(response.body.action).toMatchObject({
+      sourceIssueId,
+      cause: "legacy_execution_requires_reconciliation",
+      ownerType: "board",
+      returnOwnerAgentId: coderId,
+      wakePolicy: null,
+      monitorPolicy: null,
+      evidence: {
+        runId: sourceRunId,
+        legacyReconciliation: {
+          run: { status: "failed", runtimeMode: "legacy" },
+          leases: { activeCount: 1 },
+        },
+      },
+    });
+    const sourceActions = await request(app)
+      .get(`/api/issues/${sourceIssueId}/recovery-actions`)
+      .expect(200);
+    expect(sourceActions.body.active.id).toBe(response.body.action.id);
+    expect(sourceActions.body.active.evidence.runId).toBe(sourceRunId);
+
+    const [adjacentIssueAfter] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, adjacentIssueId));
+    const [adjacentRunAfter] = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, adjacentRunId));
+    const runsAfter = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns);
+    const adjacentActions = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, adjacentIssueId));
+
+    expect(adjacentIssueAfter).toEqual(adjacentIssueBefore);
+    expect(adjacentRunAfter).toEqual(adjacentRunBefore);
+    expect(adjacentActions).toHaveLength(0);
+    expect(runsAfter).toEqual(runsBefore);
+  });
+
   it("projects recovery action metadata into the structured wake payload", async () => {
     const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
     const action = await issueRecoveryActionService(db).upsertSourceScoped({
