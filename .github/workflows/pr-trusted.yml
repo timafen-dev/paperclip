@@ -12,7 +12,9 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: pr-${{ github.event.pull_request.number }}
+  # Preserve the pull-request number lane while giving each merge queue head
+  # its own non-empty lane (merge_group has no pull_request payload).
+  group: ${{ github.event_name == 'merge_group' && format('merge-group-{0}', github.event.merge_group.head_sha) || format('pr-{0}', github.event.pull_request.number) }}
   cancel-in-progress: true
 
 jobs:
@@ -257,6 +259,11 @@ jobs:
     needs: [gate]
     runs-on: ${{ needs.gate.outputs.runner }}
     timeout-minutes: 10
+    env:
+      # merge_group does not populate pull_request; use the event's exact
+      # queue base/head snapshots for every diff-based policy check.
+      PR_BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+      PR_HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
 
     steps:
       - name: Checkout repository
@@ -267,12 +274,13 @@ jobs:
 
       - name: Block manual lockfile edits
         if: >-
-          github.head_ref != 'chore/refresh-lockfile' &&
-          github.event.pull_request.user.login != 'dependabot[bot]'
+          github.event_name == 'merge_group' ||
+          (github.head_ref != 'chore/refresh-lockfile' &&
+          github.event.pull_request.user.login != 'dependabot[bot]')
         run: |
           # Diff the PR branch against its merge base so recent base-branch commits
           # do not masquerade as changes made by the PR itself.
-          changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}")"
+          changed="$(git diff --name-only "$PR_BASE_SHA...$PR_HEAD_SHA")"
           if printf '%s\n' "$changed" | grep -qx 'pnpm-lock.yaml'; then
             echo "Do not commit pnpm-lock.yaml in pull requests. CI owns lockfile updates."
             exit 1
@@ -297,8 +305,8 @@ jobs:
       - name: Validate migration ordering against target branch
         run: >-
           node .github/scripts/check-pr-migration-order.mjs
-          "${{ github.event.pull_request.base.sha }}"
-          "${{ github.event.pull_request.head.sha }}"
+          "$PR_BASE_SHA"
+          "$PR_HEAD_SHA"
 
       - name: Validate Dockerfile deps stage
         run: node ./scripts/check-docker-deps-stage.mjs
@@ -338,8 +346,8 @@ jobs:
 
       - name: Verify release package bootstrap for changed manifests
         run: |
-          mapfile -t changed_paths < <(git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}")
-          PAPERCLIP_RELEASE_BOOTSTRAP_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
+          mapfile -t changed_paths < <(git diff --name-only "$PR_BASE_SHA...$PR_HEAD_SHA")
+          PAPERCLIP_RELEASE_BOOTSTRAP_BASE_SHA="$PR_BASE_SHA" \
             node ./scripts/check-release-package-bootstrap.mjs "${changed_paths[@]}"
 
       # Each lane resolves a stale lockfile inline; this early check still
