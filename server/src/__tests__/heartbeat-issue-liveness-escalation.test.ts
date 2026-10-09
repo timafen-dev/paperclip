@@ -935,7 +935,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     expect(cycleKeyWakes).toHaveLength(1);
   });
 
-  it("does not re-emit a resolved-dependency wake after a checkout bounce reasserts the same blocked cycle", async () => {
+  it("does not re-emit a resolved-dependency wake after a checkout bounce reasserts blocked without a descriptor", async () => {
     const { companyId, agentId, blockedIssueId, blockerIssueId } =
       await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
     const originalBlockedTransitionAt = new Date("2026-08-04T12:00:00.000Z");
@@ -985,11 +985,9 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     expect(checkedOut.status).toBe("in_progress");
     expect(checkedOut.blockedTransitionAt).toEqual(originalBlockedTransitionAt);
 
-    const reasserted = await svc.update(blockedIssueId, {
-      status: "blocked",
-      unblockDescriptor,
-    });
+    const reasserted = await svc.update(blockedIssueId, { status: "blocked" });
     expect(reasserted?.blockedTransitionAt).toEqual(originalBlockedTransitionAt);
+    expect(reasserted?.unblockDescriptor).toEqual(unblockDescriptor);
 
     const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
 
