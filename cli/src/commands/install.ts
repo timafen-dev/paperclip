@@ -268,43 +268,17 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
   // Workspace build scripts invoke bare `pnpm`; on a machine where pnpm exists only
   // through corepack, nothing puts it on PATH, so provision a shim into the staging dir.
   const pnpmShimDir = path.join(stagingRoot, "pnpm-bin");
-  const corepackHome = path.join(stagingRoot, "corepack-home");
   fs.mkdirSync(pnpmShimDir, { recursive: true, mode: 0o700 });
   const buildEnv = (extra: NodeJS.ProcessEnv = {}) =>
-    gitBuildEnv({
-      PATH: [pnpmShimDir, process.env.PATH].filter(Boolean).join(path.delimiter),
-      COREPACK_HOME: corepackHome,
-      ...extra,
-    });
+    gitBuildEnv({ PATH: [pnpmShimDir, process.env.PATH].filter(Boolean).join(path.delimiter), ...extra });
   try {
     await runGitHubCurl(["--fail", "--silent", "--show-error", "--location", "--output", archivePath, `https://codeload.github.com/${repo}/tar.gz/${sha}`], runCommand, { maxBuffer: 4 * 1024 * 1024 });
     await runCommand("tar", ["-xzf", archivePath, "--strip-components=1", "-C", checkoutPath], { maxBuffer: 4 * 1024 * 1024 });
     await runCommand("corepack", ["enable", "pnpm", "--install-directory", pnpmShimDir], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 });
-    const rootMetadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "package.json"), "utf8")) as { packageManager?: string };
-    if (!rootMetadata.packageManager?.startsWith("pnpm@")) {
-      throw new Error("Git install requires a root packageManager pinned to pnpm.");
-    }
-    // npm pack runs package lifecycle scripts from isolated staging directories,
-    // outside the checkout that declares packageManager. Pin Corepack's global
-    // selection so those scripts use the checkout's pnpm instead of latest.
-    await runCommand("corepack", ["install", "--global", rootMetadata.packageManager], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 });
     await runCommand("corepack", ["pnpm", "install", "--frozen-lockfile"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand("bash", ["scripts/build-npm.sh", "--skip-checks", "--skip-typecheck"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     await runCommand("corepack", ["pnpm", "-r", "--filter", "@paperclipai/server...", "--if-present", "run", "build"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
-    // Build while workspace: edges still describe the dependency graph, then
-    // reproduce the release version rewrite before packing the built packages.
-    // Rewriting earlier would both invalidate the frozen lockfile and hide
-    // workspace build dependencies from pnpm's recursive filter.
-    await runCommand(process.execPath, [path.join(checkoutPath, "scripts", "release-package-map.mjs"), "set-version", metadata.version], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 });
-    // Git installs bypass the release script, so materialize the generated
-    // package inputs that release.sh normally creates before packaging.
-    for (const packageDir of ["server", "packages/adapters/claude-local", "packages/adapters/codex-local"]) {
-      const skillsPath = path.join(checkoutPath, packageDir, "skills");
-      fs.rmSync(skillsPath, { recursive: true, force: true });
-      fs.cpSync(path.join(checkoutPath, "skills"), skillsPath, { recursive: true });
-    }
-    await runCommand("corepack", ["pnpm", "--dir", "server", "prepare:ui-dist"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
     const workspacePackages = resolveGitInstallWorkspacePackages(checkoutPath);
     for (const [index, workspacePackage] of workspacePackages.entries()) {
       const packageDir = path.join(checkoutPath, workspacePackage.dir);
@@ -313,7 +287,7 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
       if (bundledDependencies.length > 0) {
         const stagedPackage = path.join(stagingRoot, `workspace-package-${index}`);
         await runCommand(process.execPath, [path.join(checkoutPath, "scripts", "prepare-bundled-package.mjs"), packageDir, stagedPackage], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 });
-        await runCommand("npm", ["pack", stagedPackage, "--pack-destination", stagingRoot, "--ignore-scripts"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 16 * 1024 * 1024 });
+        await runCommand("npm", ["pack", stagedPackage, "--pack-destination", stagingRoot], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 16 * 1024 * 1024 });
       } else {
         await runCommand("corepack", ["pnpm", "--dir", workspacePackage.dir, "pack", "--pack-destination", stagingRoot], { cwd: checkoutPath, env: buildEnv({ PAPERCLIP_RELEASE_REUSE_UI_DIST: "1" }), maxBuffer: 32 * 1024 * 1024 });
       }

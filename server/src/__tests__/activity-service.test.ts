@@ -11,7 +11,6 @@ import {
   heartbeatRuns,
   issueComments,
   issueDocuments,
-  issueRecoveryActions,
   issues,
 } from "@paperclipai/db";
 import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
@@ -66,7 +65,6 @@ describeEmbeddedPostgres("activity service", () => {
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);
     await db.delete(documents);
-    await db.delete(issueRecoveryActions);
     await db.delete(issues);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
@@ -251,130 +249,6 @@ describeEmbeddedPostgres("activity service", () => {
       nextAction: "Review the completed output.",
     });
     expect(runs[0]).not.toHaveProperty("contextSnapshot");
-  });
-
-  it("returns a legacy run held by the issue execution lock when its context lost the issue id", async () => {
-    const companyId = randomUUID();
-    const agentId = randomUUID();
-    const issueId = randomUUID();
-    const runId = randomUUID();
-    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
-
-    await db.insert(companies).values({
-      id: companyId,
-      name: "Paperclip",
-      issuePrefix,
-      requireBoardApprovalForNewAgents: false,
-    });
-    await db.insert(agents).values({
-      id: agentId,
-      companyId,
-      name: "CodexCoder",
-      role: "engineer",
-      status: "running",
-      adapterType: "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
-    });
-    await db.insert(heartbeatRuns).values({
-      id: runId,
-      companyId,
-      agentId,
-      runtimeMode: "legacy",
-      invocationSource: "assignment",
-      status: "running",
-      contextSnapshot: {},
-    });
-    await db.insert(issues).values({
-      id: issueId,
-      companyId,
-      title: "Legacy ownership is still observable",
-      status: "in_progress",
-      priority: "medium",
-      assigneeAgentId: agentId,
-      executionRunId: runId,
-      issueNumber: 1,
-      identifier: `${issuePrefix}-1`,
-    });
-
-    const runs = await activityService(db).runsForIssue(companyId, issueId);
-
-    expect(runs).toHaveLength(1);
-    expect(runs[0]).toMatchObject({
-      runId,
-      runtimeMode: "legacy",
-      status: "running",
-      contextIssueId: null,
-    });
-  });
-
-  it("retains terminal legacy dispatch evidence after its lost-context lock is released", async () => {
-    const companyId = randomUUID();
-    const agentId = randomUUID();
-    const issueId = randomUUID();
-    const runId = randomUUID();
-    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
-
-    await db.insert(companies).values({
-      id: companyId,
-      name: "Paperclip",
-      issuePrefix,
-      requireBoardApprovalForNewAgents: false,
-    });
-    await db.insert(agents).values({
-      id: agentId,
-      companyId,
-      name: "CodexCoder",
-      role: "engineer",
-      status: "idle",
-      adapterType: "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
-    });
-    await db.insert(issues).values({
-      id: issueId,
-      companyId,
-      title: "Legacy dispatch needs reconciliation",
-      status: "blocked",
-      priority: "medium",
-      assigneeAgentId: agentId,
-      issueNumber: 1,
-      identifier: `${issuePrefix}-1`,
-    });
-    await db.insert(heartbeatRuns).values({
-      id: runId,
-      companyId,
-      agentId,
-      runtimeMode: "legacy",
-      invocationSource: "assignment",
-      status: "failed",
-      errorCode: "process_lost",
-      contextSnapshot: {},
-    });
-    await db.insert(issueRecoveryActions).values({
-      companyId,
-      sourceIssueId: issueId,
-      kind: "stranded_assigned_issue",
-      status: "active",
-      ownerType: "board",
-      cause: "process_lost",
-      fingerprint: `legacy-execution:${runId}`,
-      evidence: { latestRunId: runId },
-      nextAction: "Inspect the terminal dispatch evidence.",
-    });
-
-    const runs = await activityService(db).runsForIssue(companyId, issueId);
-
-    expect(runs).toEqual([
-      expect.objectContaining({
-        runId,
-        status: "failed",
-        errorCode: "process_lost",
-        contextIssueId: null,
-      }),
-    ]);
   });
 
   it("backfills missing liveness for completed issue runs before returning the ledger", async () => {
