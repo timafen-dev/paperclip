@@ -20,6 +20,7 @@ import {
   type ExpensiveWorkspaceGitInput,
   type GitWorkspaceSnapshot,
   ReferencedSourceIgnoreScanLimitExceededError,
+  isNotAGitRepositoryError,
   readReferencedSourceGitIgnoredPaths,
   REFERENCED_SOURCE_IGNORE_MAX_ENTRY_COUNT,
   REFERENCED_SOURCE_IGNORE_MAX_TOTAL_BYTES,
@@ -52,6 +53,17 @@ async function git(cwd: string, args: string[]): Promise<string> {
 
 describe("git workspace sync", () => {
   const cleanupDirs: string[] = [];
+
+  it("classifies only completed Git not-repository stderr", () => {
+    expect(isNotAGitRepositoryError(Object.assign(
+      new Error("Command failed: git -C /work/not a git repository/app rev-parse"),
+      { code: 128, signal: null, stderr: "fatal: not a git repository (or any of the parent directories): .git" },
+    ))).toBe(true);
+    expect(isNotAGitRepositoryError(Object.assign(
+      new Error("Command failed: git -C /work/not a git repository/app rev-parse"),
+      { code: 128, signal: null, stderr: "fatal: bad config line" },
+    ))).toBe(false);
+  });
 
   afterEach(async () => {
     setExpensiveWorkspaceGitExecutor(null);

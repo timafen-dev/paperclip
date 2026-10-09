@@ -365,9 +365,13 @@ export function isNotAGitRepositoryError(error: unknown): boolean {
     return error.code === "workspace_git_scan_failed" && details.exitCode === 128 && details.signal === null &&
       typeof details.stderr === "string" && /not a git repository/i.test(details.stderr);
   }
-  const stderr = error && typeof error === "object" && "stderr" in error ? String((error as { stderr: unknown }).stderr) : "";
-  const message = error instanceof Error ? error.message : String(error);
-  return /not a git repository/i.test(stderr) || /not a git repository/i.test(message);
+  const direct = error && typeof error === "object" ? error as {
+    code?: unknown;
+    signal?: unknown;
+    stderr?: unknown;
+  } : null;
+  return direct?.code === 128 && direct.signal == null &&
+    typeof direct.stderr === "string" && /not a git repository/i.test(direct.stderr);
 }
 
 /** Bound on the number of parsed ignored entries `readReferencedSourceGitIgnoredPaths` accepts before it fails closed. */

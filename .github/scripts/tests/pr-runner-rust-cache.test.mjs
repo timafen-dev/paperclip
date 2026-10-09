@@ -72,7 +72,10 @@ function step(jobDefinition, name) {
 }
 
 function cacheStep(jobDefinition, name) {
-  const result = step(jobDefinition, name);
+  const matches = jobDefinition.steps.filter((candidate) => candidate.uses?.startsWith("Swatinem/rust-cache@"));
+  assert.equal(matches.length, 1, `${name}: exactly one Rust cache step`);
+  const [result] = matches;
+  assert.equal(result.name, name, "Rust cache step name");
   assert.match(result.uses ?? "", /^Swatinem\/rust-cache@[0-9a-f]{40}$/);
   return result;
 }
