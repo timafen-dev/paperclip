@@ -1309,6 +1309,13 @@ re-read dependency readiness, since new dependencies need not change the
 displayed task status. Old blocked rows without a receipt remain held; no
 historical status backfill is performed.
 
+Checkout may temporarily promote a blocked issue to `in_progress` without
+ending its dependency-wake cycle. If that checkout bounce is immediately
+reasserted as `blocked`, the issue retains its original `blockedTransitionAt`
+and therefore its dependency-ready wake state, including when the
+`unblockDescriptor` is omitted or changed. A real unblock clears that stamp, so
+a later re-block begins a new dependency-wake cycle.
+
 ### Queued input after a native Stop
 
 A run-only Stop ends the current response. It does not discard queued user
