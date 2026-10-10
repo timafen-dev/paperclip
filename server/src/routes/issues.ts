@@ -2889,6 +2889,43 @@ function buildExecutionStageWakeup(input: {
   return null;
 }
 
+const EXECUTION_STAGE_WAKE_COMMITTER_ACTOR_ID = "execution-stage-committer";
+
+async function persistExecutionChangesRequestedWakeup(
+  tx: Db,
+  input: {
+    companyId: string;
+    decisionId: string;
+    wakeup: NonNullable<ReturnType<typeof buildExecutionStageWakeup>>;
+  },
+) {
+  if (input.wakeup.wakeup.reason !== "execution_changes_requested") {
+    return false;
+  }
+
+  const payload = input.wakeup.wakeup.payload ?? {};
+  const contextSnapshot = input.wakeup.wakeup.contextSnapshot ?? {};
+  const issueId = readNonEmptyString(payload.issueId);
+  if (!issueId) throw new Error("execution_stage_wake_issue_id_missing");
+  await tx.insert(agentWakeupRequests).values({
+    companyId: input.companyId,
+    agentId: input.wakeup.agentId,
+    source: input.wakeup.wakeup.source,
+    triggerDetail: input.wakeup.wakeup.triggerDetail,
+    reason: input.wakeup.wakeup.reason,
+    status: "queued",
+    requestedByActorType: "system",
+    requestedByActorId: EXECUTION_STAGE_WAKE_COMMITTER_ACTOR_ID,
+    idempotencyKey: `execution-stage:${issueId}:${input.decisionId}`,
+    payload: {
+      ...payload,
+      taskId: issueId,
+      _paperclipWakeContext: contextSnapshot,
+    },
+  });
+  return true;
+}
+
 class AutoApprovalIssueMissingError extends Error {
   constructor() {
     super("Issue not found during auto-approval transaction");
@@ -14260,6 +14297,7 @@ export function issueRoutes(
         }
       }
       let issue: Awaited<ReturnType<typeof svc.update>>;
+      let durableExecutionStageWakeupPersisted = false;
       // Clear the reopen-pending flag if this update leaves the issue terminal, so
       // the rebuilt worktree does not leak. The guard reads `issue` when the
       // response ends, so it also covers a null return and a thrown error. It clears
@@ -14336,6 +14374,27 @@ export function issueRoutes(
                 body: decision.body,
                 createdByRunId: actor.runId ?? null,
               });
+              const decisionWakeup = buildExecutionStageWakeup({
+                issueId: updated.id,
+                previousState: parseIssueExecutionState(
+                  existing.executionState,
+                ),
+                nextState: parseIssueExecutionState(updated.executionState),
+                interruptedRunId,
+                requestedByActorType: actor.actorType,
+                requestedByActorId: actor.actorId,
+              });
+              if (decisionWakeup) {
+                durableExecutionStageWakeupPersisted =
+                  await persistExecutionChangesRequestedWakeup(
+                    tx as unknown as Db,
+                    {
+                      companyId: updated.companyId,
+                      decisionId,
+                      wakeup: decisionWakeup,
+                    },
+                  );
+              }
             }
 
             if (shouldRelayStop) {
@@ -14383,6 +14442,19 @@ export function issueRoutes(
       if (!issue) {
         res.status(404).json({ error: "Issue not found" });
         return;
+      }
+      if (durableExecutionStageWakeupPersisted) {
+        const committedIssue = issue;
+        void heartbeat
+          .dispatchPendingNativeStatusWakeups({
+            companyId: committedIssue.companyId,
+          })
+          .catch((err) =>
+            logger.warn(
+              { err, issueId: committedIssue.id },
+              "failed to dispatch persisted execution-stage wake intent",
+            ),
+          );
       }
       for (const publication of postCommitActivityPublications)
         publishActivity(publication);
@@ -15198,8 +15270,16 @@ export function issueRoutes(
           });
         };
 
-        if (executionStageWakeup && deferWakeForGoal !== true) {
-          addWakeup(executionStageWakeup.agentId, executionStageWakeup.wakeup);
+        if (executionStageWakeup) {
+          if (
+            !durableExecutionStageWakeupPersisted &&
+            deferWakeForGoal !== true
+          ) {
+            addWakeup(
+              executionStageWakeup.agentId,
+              executionStageWakeup.wakeup,
+            );
+          }
         } else if (
           assigneeChanged &&
           issue.assigneeAgentId &&

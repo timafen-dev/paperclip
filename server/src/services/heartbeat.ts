@@ -29583,8 +29583,8 @@ export function heartbeatService(
   }
 
   /**
-   * Native status commitment deliberately persists dependency/parent wake
-   * intents in the same transaction as the authoritative status projection.
+   * Status and execution-stage commitment deliberately persist wake intents
+   * in the same transaction as the authoritative issue projection.
    * Those rows are not runnable until the heartbeat scheduler has applied its
    * normal policy, workspace, concurrency, and responsible-user checks. Bridge
    * the durable intent into that scheduler here instead of treating a bare
@@ -29593,7 +29593,7 @@ export function heartbeatService(
    * The intent is claimed before dispatch. A deterministic dispatcher actor id
    * lets a later sweep recover the narrow process-crash window after the real
    * wake was inserted but before the intent was linked to it. Dispatch failure
-   * only requeues the intent; it never changes the provider run outcome.
+   * only requeues the intent; it never changes the committed issue transition.
    */
   async function dispatchPendingNativeStatusWakeups(
     input: {
@@ -29613,7 +29613,10 @@ export function heartbeatService(
             ? eq(agentWakeupRequests.companyId, input.companyId)
             : undefined,
           eq(agentWakeupRequests.requestedByActorType, "system"),
-          eq(agentWakeupRequests.requestedByActorId, "native-status-committer"),
+          inArray(agentWakeupRequests.requestedByActorId, [
+            "native-status-committer",
+            "execution-stage-committer",
+          ]),
           inArray(agentWakeupRequests.status, ["queued", "claimed"]),
           isNull(agentWakeupRequests.runId),
         ),
@@ -29630,7 +29633,13 @@ export function heartbeatService(
     >();
 
     for (const candidate of candidates) {
-      const dispatchActorId = `native-status-wake-dispatch:${candidate.id}`;
+      const nativeStatusIntent =
+        candidate.requestedByActorId === "native-status-committer";
+      const dispatchActorId = `${
+        nativeStatusIntent
+          ? "native-status-wake-dispatch"
+          : "execution-stage-wake-dispatch"
+      }:${candidate.id}`;
       const existingDispatch = await db
         .select()
         .from(agentWakeupRequests)
@@ -29797,9 +29806,17 @@ export function heartbeatService(
             ...wakeContext,
             ...(issueId ? { issueId, taskId: issueId } : {}),
             wakeReason: candidate.reason,
-            source: "native_status_decision",
-            statusDecisionSource: "native_status_decision",
-            nativeStatusWakeIntentId: candidate.id,
+            source:
+              readNonEmptyString(wakeContext.source) ??
+              (nativeStatusIntent
+                ? "native_status_decision"
+                : "issue.execution_stage"),
+            ...(nativeStatusIntent
+              ? {
+                  statusDecisionSource: "native_status_decision",
+                  nativeStatusWakeIntentId: candidate.id,
+                }
+              : { executionStageWakeIntentId: candidate.id }),
           },
         });
 

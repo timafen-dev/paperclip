@@ -351,6 +351,114 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(dispatchedRequests[0]).toMatchObject({ runId: dispatchedRun!.id });
   });
 
+  it("dispatches an execution-stage return wake exactly once across repeated sweeps", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const decisionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Execution stage handoff",
+      issuePrefix: `E${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "ReturnAssignee",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Address requested changes",
+      status: "in_progress",
+      priority: "critical",
+      assigneeAgentId: agentId,
+      responsibleUserId: "responsible-user",
+    });
+    const [intent] = await db
+      .insert(agentWakeupRequests)
+      .values({
+        companyId,
+        agentId,
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "execution_changes_requested",
+        requestedByActorType: "system",
+        requestedByActorId: "execution-stage-committer",
+        idempotencyKey: `execution-stage:${issueId}:${decisionId}`,
+        payload: {
+          issueId,
+          taskId: issueId,
+          executionStage: {
+            wakeRole: "executor",
+            lastDecisionId: decisionId,
+            lastDecisionOutcome: "changes_requested",
+          },
+          _paperclipWakeContext: {
+            issueId,
+            taskId: issueId,
+            source: "issue.execution_stage",
+            wakeReason: "execution_changes_requested",
+          },
+        },
+      })
+      .returning();
+
+    const first = await heartbeat.dispatchPendingNativeStatusWakeups({
+      companyId,
+    });
+    const second = await heartbeat.dispatchPendingNativeStatusWakeups({
+      companyId,
+    });
+    expect(first).toMatchObject({ scanned: 1, dispatched: 1 });
+    expect(second).toMatchObject({ scanned: 0, dispatched: 0 });
+
+    await heartbeat.drainActiveRunExecutions();
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, companyId));
+    const dispatchRequests = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(
+        eq(
+          agentWakeupRequests.requestedByActorId,
+          `execution-stage-wake-dispatch:${intent!.id}`,
+        ),
+      );
+    expect(dispatchRequests).toHaveLength(1);
+    const executionStageRun = runs.find(
+      (run) => run.id === dispatchRequests[0]!.runId,
+    );
+    expect(executionStageRun?.contextSnapshot).toMatchObject({
+      issueId,
+      taskId: issueId,
+      wakeReason: "execution_changes_requested",
+      source: "issue.execution_stage",
+      executionStageWakeIntentId: intent!.id,
+    });
+    expect(
+      await db
+        .select({
+          status: agentWakeupRequests.status,
+          runId: agentWakeupRequests.runId,
+        })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, intent!.id)),
+    ).toEqual([
+      { status: "coalesced", runId: executionStageRun!.id },
+    ]);
+  });
+
   it.each(["onboarding", "ordinary", "cancelled"])("dispatches only a verified completed onboarding report: %s", async kind => {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), childId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Completion", issuePrefix: `R${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}` });
