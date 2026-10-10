@@ -2712,7 +2712,11 @@ function defaultAdditionalProjectWorkspaceDeps(
             eq(projectWorkspaces.projectId, projectId),
           ),
         )
-        .orderBy(asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id)),
+        .orderBy(
+          desc(projectWorkspaces.isPrimary),
+          asc(projectWorkspaces.createdAt),
+          asc(projectWorkspaces.id),
+        ),
     resolveConfiguredOrManagedProjectCwd: (input) =>
       resolveConfiguredOrManagedProjectCwd({
         ...input,
@@ -12388,7 +12392,11 @@ export function heartbeatService(
               eq(projectWorkspaces.projectId, workspaceProjectId),
             ),
           )
-          .orderBy(asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id))
+          .orderBy(
+            desc(projectWorkspaces.isPrimary),
+            asc(projectWorkspaces.createdAt),
+            asc(projectWorkspaces.id),
+          )
       : [];
     const projectWorkspaceRows = prioritizeProjectWorkspaceCandidatesForRun(
       unorderedProjectWorkspaceRows,
