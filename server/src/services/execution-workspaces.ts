@@ -34,7 +34,11 @@ import type {
   GitWorktreeBranchAncestryVerdict,
   IssueRecoveryAction,
 } from "@paperclipai/shared";
-import { deriveProjectUrlKey, WORKSPACE_OVERVIEW_LINKED_ISSUE_LIMIT } from "@paperclipai/shared";
+import {
+  deriveProjectUrlKey,
+  isUuidLike,
+  WORKSPACE_OVERVIEW_LINKED_ISSUE_LIMIT,
+} from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import {
@@ -2245,10 +2249,13 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     },
 
     getById: async (id: string) => {
+      const normalizedId = id.trim();
+      if (!isUuidLike(normalizedId)) return null;
+
       const row = await db
         .select()
         .from(executionWorkspaces)
-        .where(eq(executionWorkspaces.id, id))
+        .where(eq(executionWorkspaces.id, normalizedId))
         .then((rows) => rows[0] ?? null);
       if (!row) return null;
       const { refreshPersistedRuntimeServiceHealth } = await import("./workspace-runtime.js");
