@@ -24786,7 +24786,7 @@ export function heartbeatService(
             }
             const adapterRuntimeConfig =
               agent.adapterType === "process"
-                ? { ...runtimeConfig, cwd: executionWorkspace.cwd }
+                ? { ...runtimeConfig, cwd: resolvedWorkspace.cwd }
                 : runtimeConfig;
             const guardedDispatch =
               await dispatchResolvedInteractionContinuationWithAtomicGate(
