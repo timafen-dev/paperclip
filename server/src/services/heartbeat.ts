@@ -24784,6 +24784,10 @@ export function heartbeatService(
             if (managedMcpConfig) {
               adapterContext.paperclipManagedMcp = managedMcpConfig;
             }
+            const adapterRuntimeConfig =
+              agent.adapterType === "process"
+                ? { ...runtimeConfig, cwd: executionWorkspace.cwd }
+                : runtimeConfig;
             const guardedDispatch =
               await dispatchResolvedInteractionContinuationWithAtomicGate(
                 (markDispatchStarted) => {
@@ -24792,7 +24796,7 @@ export function heartbeatService(
                     runId: run.id,
                     agent,
                     runtime: runtimeForAdapter,
-                    config: runtimeConfig,
+                    config: adapterRuntimeConfig,
                     context: adapterContext,
                     executionContinuation: executionContinuation ?? null,
                     runtimeCommandSpec:

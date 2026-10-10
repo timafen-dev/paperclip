@@ -135,6 +135,39 @@ suite("task project repository provisioning", () => {
     expect(await readFile(path.join(directories[0], "email.txt"), "utf8")).toBe("private email 0");
   }, 40_000);
 
+  it("passes a local-folder workspace to a process adapter after attaching a repository", async () => {
+    const companyId = randomUUID(), projectId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
+    const localFolder = path.join(root, companyId, "local-folder");
+    const attachedRepository = path.join(root, companyId, "attached-repository");
+    await mkdir(localFolder, { recursive: true });
+    await mkdir(attachedRepository, { recursive: true });
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: attachedRepository, stdio: "ignore" });
+    git("init", "-b", "main");
+    await writeFile(path.join(attachedRepository, "README.md"), "attached repository\n");
+    git("add", ".");
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "seed");
+
+    await db.insert(companies).values({ id: companyId, name: "Local folder", issuePrefix: `L${companyId.slice(0, 6)}`, defaultResponsibleUserId: "responsible-user" });
+    await db.insert(projects).values({ id: projectId, companyId, name: "Attached repository", status: "in_progress" });
+    await db.insert(projectWorkspaces).values([
+      { id: randomUUID(), companyId, projectId, name: "Local folder", sourceType: "local_path", cwd: localFolder, isPrimary: true },
+      { id: randomUUID(), companyId, projectId, name: "Attached repository", sourceType: "git_repo", repoUrl: pathToFileURL(attachedRepository).href, cwd: attachedRepository, isPrimary: false },
+    ]);
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Process agent", role: "engineer", status: "idle", adapterType: "process",
+      adapterConfig: { command: process.execPath, args: ["-e", ""] }, runtimeConfig: {}, permissions: {},
+    });
+    await db.insert(issues).values({ id: issueId, companyId, projectId, title: "Use local project workspace", status: "todo", assigneeAgentId: agentId });
+
+    const run = await heartbeat.wakeup(agentId, { source: "on_demand", triggerDetail: "manual", contextSnapshot: { issueId, projectId } });
+    await vi.waitFor(async () => expect((await heartbeat.getRun(run!.id))?.status).toBe("succeeded"), { timeout: 15_000 });
+
+    const input = execute.mock.calls.find(([context]) => context.runId === run!.id)![0];
+    expect(input.config.cwd).toBe(localFolder);
+    const attached = (input.context.paperclipWorkspaces as Array<{ cwd: string }>).find((workspace) => workspace.cwd.includes(".paperclip-repositories"));
+    expect(await readFile(path.join(attached!.cwd, "README.md"), "utf8")).toBe("attached repository\n");
+  }, 25_000);
+
   it.each([
     { scenario: "no configured workspace", configuredWorkspace: false, explicitIsolation: null },
     { scenario: "configured Git workspace", configuredWorkspace: true, explicitIsolation: null },
