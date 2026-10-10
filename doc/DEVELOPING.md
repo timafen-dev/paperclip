@@ -729,7 +729,7 @@ Local adapters require their corresponding CLI/session setup on the machine runn
 
 ## Project Repository Checkouts
 
-Tasks use every distinct repository attached to their project, including repository-only sources with no local folder. Paperclip creates a managed checkout when no local folder is configured. The selected repository remains at the task workspace root. Other project repositories have editable, independent Git checkouts under `.paperclip-repositories/<name>-<key>`. Workspace hints expose each checkout path to the agent.
+Tasks use every distinct repository attached to their project, including repository-only sources with no local folder. A configured local folder, whether Git-backed or not, remains the task workspace root; Paperclip creates a managed checkout when no local folder is configured. Project repositories other than that root checkout, including repositories attached to a non-Git local folder, have editable, independent Git checkouts under `.paperclip-repositories/<name>-<key>`. Workspace hints expose each checkout path to the agent.
 
 When an additional repository has a configured local checkout, Paperclip seeds the task copy from its current commit and uncommitted files. Git-ignored files stay out of that copy. Subsequent task edits stay in the task copy. They do not overwrite the configured source folder. Existing task copies retain their work across runs.
 
