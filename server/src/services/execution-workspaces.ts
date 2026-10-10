@@ -95,6 +95,10 @@ const WORKSPACE_BRANCH_INCOHERENCE_REASON = "git_worktree_branch_incoherence";
 const WORKSPACE_VALIDATION_RECOVERY_CAUSE = "workspace_validation_failed";
 export const ISSUE_TERMINAL_WORKSPACE_CLEANUP_REASON = "issue_terminal";
 
+function isValidExecutionWorkspaceId(id: string): boolean {
+  return id === id.trim() && isUuidLike(id);
+}
+
 // The reopen-failure reason kept on the row when a rebuild does not finish. The
 // value is sanitized: it never contains a repository URL, a host path, or git
 // output.
@@ -2249,13 +2253,12 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     },
 
     getById: async (id: string) => {
-      const normalizedId = id.trim();
-      if (!isUuidLike(normalizedId)) return null;
+      if (!isValidExecutionWorkspaceId(id)) return null;
 
       const row = await db
         .select()
         .from(executionWorkspaces)
-        .where(eq(executionWorkspaces.id, normalizedId))
+        .where(eq(executionWorkspaces.id, id))
         .then((rows) => rows[0] ?? null);
       if (!row) return null;
       const { refreshPersistedRuntimeServiceHealth } = await import("./workspace-runtime.js");
@@ -2273,6 +2276,8 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     },
 
     getCloseReadiness: async (id: string): Promise<ExecutionWorkspaceCloseReadiness | null> => {
+      if (!isValidExecutionWorkspaceId(id)) return null;
+
       const workspace = await db
         .select()
         .from(executionWorkspaces)
