@@ -21263,6 +21263,12 @@ export function heartbeatService(
             : (issueRef?.executionWorkspacePreference ?? null),
           existingExecutionWorkspaceStatus:
             existingExecutionWorkspace?.status ?? null,
+          requestedExistingBranch: nativeRecoveryExecutionWorkspaceId
+            ? null
+            : (issueExecutionWorkspaceSettings?.workspaceStrategy
+                ?.existingBranch ?? null),
+          existingExecutionWorkspaceBranchName:
+            existingExecutionWorkspace?.branchName ?? null,
         });
       const requestedShouldReuseExisting =
         workspaceReuseRequest.requestedShouldReuseExisting;
@@ -28137,9 +28143,12 @@ export function heartbeatService(
               resolvedMode,
               workspaceManagedConfig,
             );
-            const existingExecutionWorkspaceStatus = issue.executionWorkspaceId
+            const existingExecutionWorkspace = issue.executionWorkspaceId
               ? await tx
-                  .select({ status: executionWorkspaces.status })
+                  .select({
+                    status: executionWorkspaces.status,
+                    branchName: executionWorkspaces.branchName,
+                  })
                   .from(executionWorkspaces)
                   .where(
                     and(
@@ -28147,13 +28156,18 @@ export function heartbeatService(
                       eq(executionWorkspaces.companyId, issue.companyId),
                     ),
                   )
-                  .then((rows) => rows[0]?.status ?? null)
+                  .then((rows) => rows[0] ?? null)
               : null;
             const reuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
               issueExecutionWorkspaceId: issue.executionWorkspaceId,
               issueExecutionWorkspacePreference:
                 issue.executionWorkspacePreference,
-              existingExecutionWorkspaceStatus,
+              existingExecutionWorkspaceStatus:
+                existingExecutionWorkspace?.status ?? null,
+              requestedExistingBranch:
+                issueSettings?.workspaceStrategy?.existingBranch ?? null,
+              existingExecutionWorkspaceBranchName:
+                existingExecutionWorkspace?.branchName ?? null,
             });
             const hasResolvablePriorSessionWorkspace =
               await resolveHasResolvablePriorSessionWorkspace();
