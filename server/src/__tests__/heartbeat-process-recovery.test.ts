@@ -2927,6 +2927,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   it("blocks native recovery when an existing-branch override supersedes its persisted workspace", async () => {
     const { companyId, agentId, issueId, runId } =
       await seedQueuedIssueRunFixture();
+    // Issue-level workspace overrides are intentionally inert unless this
+    // operator feature is enabled, just as they are in a running instance.
+    await instanceSettingsService(db).updateExperimental({
+      enableIsolatedWorkspaces: true,
+      enableIsolatedWorkspacesByDefault: false,
+    });
     const projectId = randomUUID();
     const projectWorkspaceId = randomUUID();
     const staleWorkspaceId = randomUUID();
