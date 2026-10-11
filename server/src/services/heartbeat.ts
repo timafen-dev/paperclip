@@ -440,6 +440,7 @@ import {
   WORKTREE_INSTANCE_ROOT_METADATA_KEY,
 } from "./workspace-instance-cleanup.js";
 import { issueService } from "./issues.js";
+import { issueRecoveryActionService } from "./issue-recovery-actions.js";
 import {
   blockRunnerGoalRecovery,
   failRunnerGoalAction,
@@ -29632,9 +29633,90 @@ export function heartbeatService(
       { runId: string | null; status: string }
     >();
 
+    const preserveExecutionStageLivenessOnAdmissionDenial = async (
+      database: Db,
+      candidate: typeof agentWakeupRequests.$inferSelect,
+      issueId: string | null,
+      receipt: typeof agentWakeupRequests.$inferSelect,
+    ) => {
+      if (
+        candidate.requestedByActorId !== "execution-stage-committer" ||
+        candidate.reason !== "execution_changes_requested" ||
+        !issueId ||
+        receipt.status !== "skipped" ||
+        receipt.runId
+      )
+        return;
+
+      const issue = await database
+        .select({
+          id: issues.id,
+          assigneeAgentId: issues.assigneeAgentId,
+        })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.id, issueId),
+            eq(issues.companyId, candidate.companyId),
+            eq(issues.status, "in_progress"),
+            eq(issues.assigneeAgentId, candidate.agentId),
+          ),
+        )
+        .for("update")
+        .then((rows) => rows[0] ?? null);
+      if (!issue) return;
+
+      const recoveryActions = issueRecoveryActionService(database);
+      const active = await recoveryActions.getActiveForIssue(
+        candidate.companyId,
+        issue.id,
+        database,
+      );
+      if (active) return;
+
+      await recoveryActions.upsertSourceScoped({
+        companyId: candidate.companyId,
+        sourceIssueId: issue.id,
+        kind: "stranded_assigned_issue",
+        ownerType: "board",
+        previousOwnerAgentId: candidate.agentId,
+        returnOwnerAgentId: candidate.agentId,
+        cause: "execution_stage_wake_admission_denied",
+        fingerprint: `execution-stage-admission:${candidate.id}`,
+        evidence: {
+          decisionId: readNonEmptyString(
+            parseObject(parseObject(candidate.payload).executionStage)
+              .lastDecisionId,
+          ),
+          wakeupRequestId: candidate.id,
+          dispatchReceiptId: receipt.id,
+          dispatchReason: receipt.reason,
+          dispatchError: receipt.error,
+        },
+        nextAction:
+          "Board operator: inspect the admission denial, then retry the original owner, reassign, or intentionally resolve the task.",
+        wakePolicy: {
+          type: "board_escalation",
+          reason: "execution_stage_wake_admission_denied",
+          preservesSourceAssignee: true,
+        },
+        maxAttempts: null,
+        preserveExistingOwner: true,
+      });
+    };
+
     for (const candidate of candidates) {
       const nativeStatusIntent =
         candidate.requestedByActorId === "native-status-committer";
+      const candidatePayload = parseObject(candidate.payload);
+      const candidateWakeContext = parseObject(
+        candidatePayload._paperclipWakeContext,
+      );
+      const candidateIssueId =
+        readNonEmptyString(candidatePayload.issueId) ??
+        readNonEmptyString(candidatePayload.taskId) ??
+        readNonEmptyString(candidateWakeContext.issueId) ??
+        null;
       const dispatchActorId = `${
         nativeStatusIntent
           ? "native-status-wake-dispatch"
@@ -29660,24 +29742,32 @@ export function heartbeatService(
           : existingDispatch.status === "deferred_issue_execution"
             ? "coalesced"
             : existingDispatch.status;
-        await db
-          .update(agentWakeupRequests)
-          .set({
-            status: recoveredStatus,
-            runId: existingDispatch.runId,
-            finishedAt:
-              (existingDispatch.runId ?? existingDispatch.finishedAt)
-                ? (existingDispatch.finishedAt ?? now)
-                : null,
-            error: existingDispatch.error,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(agentWakeupRequests.id, candidate.id),
-              isNull(agentWakeupRequests.runId),
-            ),
+        await db.transaction(async (tx) => {
+          await preserveExecutionStageLivenessOnAdmissionDenial(
+            tx as unknown as Db,
+            candidate,
+            candidateIssueId,
+            existingDispatch,
           );
+          await tx
+            .update(agentWakeupRequests)
+            .set({
+              status: recoveredStatus,
+              runId: existingDispatch.runId,
+              finishedAt:
+                (existingDispatch.runId ?? existingDispatch.finishedAt)
+                  ? (existingDispatch.finishedAt ?? now)
+                  : null,
+              error: existingDispatch.error,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(agentWakeupRequests.id, candidate.id),
+                isNull(agentWakeupRequests.runId),
+              ),
+            );
+        });
         recovered += 1;
         continue;
       }
@@ -29840,21 +29930,31 @@ export function heartbeatService(
         // promote both rows (the original has no nativeStatusWakeIntentId
         // provenance and would otherwise run once before the dispatch receipt).
         const deliveredStatus = delivered?.status ?? "queued";
-        await db
-          .update(agentWakeupRequests)
-          .set({
-            status: wakeRun || deliveredStatus === "deferred_issue_execution"
-              ? "coalesced"
-              : deliveredStatus,
-            runId: wakeRun?.id ?? delivered?.runId ?? null,
-            finishedAt:
-              wakeRun || delivered?.finishedAt
-                ? (delivered?.finishedAt ?? new Date())
-                : null,
-            error: delivered?.error ?? null,
-            updatedAt: new Date(),
-          })
-          .where(eq(agentWakeupRequests.id, candidate.id));
+        await db.transaction(async (tx) => {
+          if (delivered) {
+            await preserveExecutionStageLivenessOnAdmissionDenial(
+              tx as unknown as Db,
+              candidate,
+              issueId,
+              delivered,
+            );
+          }
+          await tx
+            .update(agentWakeupRequests)
+            .set({
+              status: wakeRun || deliveredStatus === "deferred_issue_execution"
+                ? "coalesced"
+                : deliveredStatus,
+              runId: wakeRun?.id ?? delivered?.runId ?? null,
+              finishedAt:
+                wakeRun || delivered?.finishedAt
+                  ? (delivered?.finishedAt ?? new Date())
+                  : null,
+              error: delivered?.error ?? null,
+              updatedAt: new Date(),
+            })
+            .where(eq(agentWakeupRequests.id, candidate.id));
+        });
 
         if (scopeKey) {
           deliveredByIssueScope.set(scopeKey, {

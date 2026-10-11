@@ -459,6 +459,97 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     ]);
   });
 
+  it("creates one recovery action when an execution-stage return wake is denied", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const decisionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Execution stage denial",
+      issuePrefix: `E${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "ReturnAssignee",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: false, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Address requested changes",
+      status: "in_progress",
+      priority: "critical",
+      assigneeAgentId: agentId,
+      responsibleUserId: "responsible-user",
+    });
+    const [intent] = await db
+      .insert(agentWakeupRequests)
+      .values({
+        companyId,
+        agentId,
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "execution_changes_requested",
+        requestedByActorType: "system",
+        requestedByActorId: "execution-stage-committer",
+        idempotencyKey: `execution-stage:${issueId}:${decisionId}`,
+        payload: {
+          issueId,
+          taskId: issueId,
+          executionStage: {
+            wakeRole: "executor",
+            lastDecisionId: decisionId,
+            lastDecisionOutcome: "changes_requested",
+          },
+          _paperclipWakeContext: {
+            issueId,
+            taskId: issueId,
+            source: "issue.execution_stage",
+            wakeReason: "execution_changes_requested",
+          },
+        },
+      })
+      .returning();
+
+    const first = await heartbeat.dispatchPendingNativeStatusWakeups({ companyId });
+    const second = await heartbeat.dispatchPendingNativeStatusWakeups({ companyId });
+
+    expect(first).toMatchObject({ scanned: 1, dispatched: 0, deferred: 1 });
+    expect(second).toMatchObject({ scanned: 0, dispatched: 0 });
+    expect(
+      await db
+        .select({ status: agentWakeupRequests.status })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, intent!.id)),
+    ).toEqual([{ status: "skipped" }]);
+    expect(
+      await db
+        .select({
+          status: issueRecoveryActions.status,
+          ownerType: issueRecoveryActions.ownerType,
+          returnOwnerAgentId: issueRecoveryActions.returnOwnerAgentId,
+          fingerprint: issueRecoveryActions.fingerprint,
+        })
+        .from(issueRecoveryActions)
+        .where(eq(issueRecoveryActions.sourceIssueId, issueId)),
+    ).toEqual([
+      expect.objectContaining({
+        status: "active",
+        ownerType: "board",
+        returnOwnerAgentId: agentId,
+      }),
+    ]);
+  });
+
   it.each(["onboarding", "ordinary", "cancelled"])("dispatches only a verified completed onboarding report: %s", async kind => {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), childId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Completion", issuePrefix: `R${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}` });
