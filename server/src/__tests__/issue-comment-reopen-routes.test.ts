@@ -25,6 +25,12 @@ const mockAccessService = vi.hoisted(() => ({
 
 const mockHeartbeatService = vi.hoisted(() => ({
   wakeup: vi.fn(async () => undefined),
+  dispatchPendingNativeStatusWakeups: vi.fn(async () => ({
+    scanned: 0,
+    dispatched: 0,
+    recovered: 0,
+    deferred: 0,
+  })),
   reportRunActivity: vi.fn(async () => undefined),
   getRun: vi.fn(async () => null),
   getActiveRunForAgent: vi.fn(async () => null),
@@ -317,7 +323,7 @@ async function waitForWakeup(assertion: () => void) {
   await vi.waitFor(assertion);
 }
 
-describe.sequential("issue comment reopen routes", () => {
+describe("issue comment reopen routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIssueService.getById.mockReset();
@@ -334,6 +340,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockAccessService.decide.mockReset();
     mockAccessService.hasPermission.mockReset();
     mockHeartbeatService.wakeup.mockReset();
+    mockHeartbeatService.dispatchPendingNativeStatusWakeups.mockReset();
     mockHeartbeatService.reportRunActivity.mockReset();
     mockHeartbeatService.getRun.mockReset();
     mockHeartbeatService.getActiveRunForAgent.mockReset();
@@ -363,6 +370,12 @@ describe.sequential("issue comment reopen routes", () => {
     mockDbSelectOrderBy.mockReset();
     mockDb.transaction.mockReset();
     mockTxInsertValues.mockResolvedValue(undefined);
+    mockHeartbeatService.dispatchPendingNativeStatusWakeups.mockResolvedValue({
+      scanned: 0,
+      dispatched: 0,
+      recovered: 0,
+      deferred: 0,
+    });
     mockTxInsert.mockImplementation(() => ({ values: mockTxInsertValues }));
     mockDbSelectOrderBy.mockResolvedValue([]);
     mockDbSelectWhere.mockImplementation(() => ({
@@ -821,7 +834,7 @@ describe.sequential("issue comment reopen routes", () => {
     });
     mockAccessService.decide.mockImplementation(
       async (input: { action?: string }) => {
-        const allowed = input.action === "issue:comment";
+        const allowed = input.action === "issue:read" || input.action === "issue:comment";
         return {
           allowed,
           action: input.action,
@@ -869,7 +882,7 @@ describe.sequential("issue comment reopen routes", () => {
       });
       mockAccessService.decide.mockImplementation(
         async (input: { action?: string }) => {
-          const allowed = input.action === "issue:comment";
+          const allowed = input.action === "issue:read" || input.action === "issue:comment";
           return {
             allowed,
             action: input.action,
@@ -4084,22 +4097,38 @@ describe.sequential("issue comment reopen routes", () => {
       });
 
     expect(res.status).toBe(200);
-    await waitForWakeup(() =>
-      expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
-        "22222222-2222-4222-8222-222222222222",
-        expect.objectContaining({
-          reason: "execution_changes_requested",
-          payload: expect.objectContaining({
-            issueId: "11111111-1111-4111-8111-111111111111",
-            executionStage: expect.objectContaining({
-              wakeRole: "executor",
-              stageType: "review",
-              lastDecisionOutcome: "changes_requested",
-              allowedActions: ["address_changes", "resubmit"],
-            }),
+    expect(mockTxInsertValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        companyId: "company-1",
+        agentId: "22222222-2222-4222-8222-222222222222",
+        status: "queued",
+        reason: "execution_changes_requested",
+        requestedByActorType: "system",
+        requestedByActorId: "execution-stage-committer",
+        idempotencyKey: expect.stringMatching(
+          /^execution-stage:11111111-1111-4111-8111-111111111111:/,
+        ),
+        payload: expect.objectContaining({
+          issueId: "11111111-1111-4111-8111-111111111111",
+          taskId: "11111111-1111-4111-8111-111111111111",
+          executionStage: expect.objectContaining({
+            wakeRole: "executor",
+            stageType: "review",
+            lastDecisionOutcome: "changes_requested",
+            allowedActions: ["address_changes", "resubmit"],
+          }),
+          _paperclipWakeContext: expect.objectContaining({
+            source: "issue.execution_stage",
+            wakeReason: "execution_changes_requested",
           }),
         }),
-      ),
+      }),
     );
+    await waitForWakeup(() =>
+      expect(
+        mockHeartbeatService.dispatchPendingNativeStatusWakeups,
+      ).toHaveBeenCalledWith({ companyId: "company-1" }),
+    );
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 });

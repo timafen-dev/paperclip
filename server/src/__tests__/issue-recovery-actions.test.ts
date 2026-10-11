@@ -4,9 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import express from "express";
 import request from "supertest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
 import {
+  costEvents,
   agents,
   agentRuntimeState,
   authUsers,
@@ -154,6 +156,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     await db.delete(issueComments);
     await db.delete(environmentLeases);
     await db.delete(activityLog);
+    await db.delete(costEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(environments);
@@ -361,12 +364,16 @@ describeEmbeddedPostgres("issue recovery actions", () => {
   it.each(["company", "issue", "legacy", "finished"])("rejects an apparently live run with the wrong %s authority", async (mismatch) => {
     const { companyId, sourceIssueId, runId, svc } = await seedNativeFinalizationRecovery("running");
     const other = await seedCompany();
-    await db.update(heartbeatRuns).set({
+    // Exercise service rejection of historical corruption behind the immutable binding trigger.
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`set local session_replication_role = replica`);
+      await tx.update(heartbeatRuns).set({
       ...(mismatch === "company" ? { companyId: other.companyId, agentId: other.coderId } : {}),
       ...(mismatch === "issue" ? { nativeIssueId: other.sourceIssueId } : {}),
       ...(mismatch === "legacy" ? { runtimeMode: "legacy" } : {}),
       ...(mismatch === "finished" ? { finishedAt: new Date() } : {}),
     }).where(eq(heartbeatRuns.id, runId));
+    });
     expect((await svc.getActiveForIssue(companyId, sourceIssueId))?.nativeRunActivity).toBeNull();
   });
 
@@ -1779,6 +1786,29 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
   });
 
+  it.each(["resolved", "cancelled"])("omits %s recovery instructions when the original worker resumes", async (status) => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "stranded_assigned_issue", ownerType: "board",
+      returnOwnerAgentId: coderId, cause: "stranded_assigned_issue", fingerprint: "finished-recovery",
+      evidence: { failureSummary: "Retry budget exhausted during cleanup." },
+      nextAction: "Repair the runtime, then retry the original owner.", wakePolicy: null,
+    });
+    await db.update(issueRecoveryActions).set({ status, outcome: "handed_back", resolvedAt: new Date() })
+      .where(eq(issueRecoveryActions.id, action.id));
+    const payload = await buildPaperclipWakePayload({ db, companyId, contextSnapshot: {
+      issueId: sourceIssueId, wakeReason: "issue_recovery_action_restored",
+      recoveryActionId: action.id, recoveryCause: action.cause,
+    } });
+    expect(payload?.issue?.id).toBe(sourceIssueId);
+    expect(payload?.recovery).toBeNull();
+    const prompt = renderPaperclipWakePrompt(payload);
+    expect(prompt).toContain("Implement backend recovery");
+    expect(prompt).not.toContain("Recovery contract:");
+    expect(prompt).not.toContain(action.nextAction);
+    expect(prompt).not.toContain("Do not produce the deliverable");
+  });
+
   it("accepts new verified evidence after an automatic no-replay disposition without reopening on duplicate requests", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     const runId = randomUUID();
@@ -2251,6 +2281,122 @@ describeEmbeddedPostgres("issue recovery actions", () => {
         payload: expect.objectContaining({ issueId: sourceIssueId, recoveryActionId: action.id }),
       }),
     );
+  });
+
+  it("persists one return wake when recovery resolution requests changes", async () => {
+    const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
+    const stageId = randomUUID();
+    const reviewerRunId = randomUUID();
+    await db.update(agents).set({
+      runtimeConfig: { heartbeat: { wakeOnDemand: false, maxConcurrentRuns: 1 } },
+    }).where(eq(agents.id, coderId));
+    await db.update(issues).set({
+      status: "in_review",
+      assigneeAgentId: managerId,
+      executionPolicy: {
+        mode: "normal",
+        commentRequired: true,
+        stages: [{
+          id: stageId,
+          type: "review",
+          participants: [{ id: randomUUID(), type: "agent", agentId: managerId, userId: null }],
+        }],
+      },
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: managerId },
+        returnAssignee: { type: "agent", agentId: coderId },
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+    }).where(eq(issues.id, sourceIssueId));
+    await db.insert(heartbeatRuns).values({
+      id: reviewerRunId,
+      companyId,
+      agentId: managerId,
+      status: "running",
+      invocationSource: "manual",
+      scopeKind: "issue",
+      issueId: sourceIssueId,
+      contextSnapshot: { issueId: sourceIssueId },
+    });
+    const recoveryActions = issueRecoveryActionService(db);
+    const action = await recoveryActions.upsertSourceScoped({
+      companyId,
+      sourceIssueId,
+      kind: "stranded_assigned_issue",
+      ownerType: "board",
+      previousOwnerAgentId: coderId,
+      cause: "stranded_assigned_issue",
+      fingerprint: "recovery-resolution:changes-requested",
+      nextAction: "Review the recovered execution path.",
+      wakePolicy: { type: "board_escalation" },
+    });
+    const app = createApp({
+      type: "agent",
+      agentId: managerId,
+      companyId,
+      runId: reviewerRunId,
+    });
+    const body = {
+      actionId: action.id,
+      outcome: "restored",
+      sourceIssueStatus: "todo",
+      resolutionNote: "Address the remaining review findings.",
+    };
+
+    const resolved = await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send(body)
+      .expect(200);
+
+    expect(resolved.body.issue).toMatchObject({
+      id: sourceIssueId,
+      status: "in_progress",
+      assigneeAgentId: coderId,
+    });
+    await vi.waitFor(async () => {
+      const intents = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, companyId),
+            eq(agentWakeupRequests.requestedByActorId, "execution-stage-committer"),
+          ),
+        );
+      expect(intents).toHaveLength(1);
+      expect(intents[0]).toMatchObject({
+        agentId: coderId,
+        reason: "execution_changes_requested",
+        payload: expect.objectContaining({ issueId: sourceIssueId }),
+      });
+      expect(await recoveryActions.getActiveForIssue(companyId, sourceIssueId)).toMatchObject({
+        status: "active",
+        ownerType: "board",
+        returnOwnerAgentId: coderId,
+      });
+    });
+
+    await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send(body)
+      .expect(200);
+    expect(
+      await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, companyId),
+            eq(agentWakeupRequests.requestedByActorId, "execution-stage-committer"),
+          ),
+        ),
+    ).toHaveLength(1);
   });
 
   it("does not enqueue a restored wake when todo status and assignee are unchanged", async () => {
