@@ -9537,7 +9537,13 @@ export function issueRoutes(
           const [recoveryAction] = await tx.update(issueRecoveryActions).set({ status: "resolved", outcome: "restored",
             resolutionNote: resolutionNote ?? null, resolvedAt: new Date(), updatedAt: new Date(),
           }).where(eq(issueRecoveryActions.id, workspaceRepairAction.id)).returning();
-          return { issue: lockedIssue, recoveryAction, chatRetry: null, workspaceRepairOnly: true };
+          return {
+            issue: lockedIssue,
+            recoveryAction,
+            chatRetry: null,
+            workspaceRepairOnly: true,
+            durableExecutionStageWakeupPersisted: false,
+          };
         }
 
         let activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(
@@ -9758,6 +9764,8 @@ export function issueRoutes(
           );
         }
         let issue = lockedIssue;
+        let executionPolicyDecisionId: string | null = null;
+        let durableExecutionStageWakeupPersisted = false;
         const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;
         if (outcome === "blocked" && sourceStatusChanged) {
           const unresolvedBlockers = await tx
@@ -9841,6 +9849,7 @@ export function issueRoutes(
             Object.assign(updateFields, transition.patch);
             if (transition.decision) {
               const decisionId = randomUUID();
+              executionPolicyDecisionId = decisionId;
               const nextExecutionState = updateFields.executionState;
               if (
                 !nextExecutionState ||
@@ -9891,6 +9900,29 @@ export function issueRoutes(
                 );
           if (!updatedIssue) throw notFound("Issue not found");
           issue = updatedIssue;
+          if (executionPolicyDecisionId) {
+            const decisionWakeup = buildExecutionStageWakeup({
+              issueId: updatedIssue.id,
+              previousState: parseIssueExecutionState(
+                lockedIssue.executionState,
+              ),
+              nextState: parseIssueExecutionState(updatedIssue.executionState),
+              interruptedRunId: null,
+              requestedByActorType: actor.actorType,
+              requestedByActorId: actor.actorId,
+            });
+            if (decisionWakeup) {
+              durableExecutionStageWakeupPersisted =
+                await persistExecutionChangesRequestedWakeup(
+                  tx as unknown as Db,
+                  {
+                    companyId: updatedIssue.companyId,
+                    decisionId: executionPolicyDecisionId,
+                    wakeup: decisionWakeup,
+                  },
+                );
+            }
+          }
         }
 
         const recordedOutcome =
@@ -9916,7 +9948,12 @@ export function issueRoutes(
         );
         if (!recoveryAction) throw notFound("Active recovery action not found");
 
-        return { issue, recoveryAction, chatRetry };
+        return {
+          issue,
+          recoveryAction,
+          chatRetry,
+          durableExecutionStageWakeupPersisted,
+        };
       });
       if (result.replayed) {
         res.json({
@@ -9932,6 +9969,20 @@ export function issueRoutes(
       await flushIssuePostCommitActions(postCommitIssueActions);
 
       await routinesSvc.syncRunStatusForIssue(result.issue.id);
+
+      if (result.durableExecutionStageWakeupPersisted) {
+        const committedIssue = result.issue;
+        void heartbeat
+          .dispatchPendingNativeStatusWakeups({
+            companyId: committedIssue.companyId,
+          })
+          .catch((err) =>
+            logger.warn(
+              { err, issueId: committedIssue.id },
+              "failed to dispatch persisted execution-stage wake intent",
+            ),
+          );
+      }
 
       if (sourceIssueStatus && existing.status !== result.issue.status) {
         await logActivity(db, {
@@ -9990,6 +10041,7 @@ export function issueRoutes(
           );
         }
       } else if (
+        !result.durableExecutionStageWakeupPersisted &&
         !executionReconciliation &&
         sourceIssueStatus === "todo" &&
         result.issue.assigneeAgentId &&

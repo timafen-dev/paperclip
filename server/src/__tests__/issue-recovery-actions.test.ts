@@ -2283,6 +2283,106 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     );
   });
 
+  it("persists one return wake when recovery resolution requests changes", async () => {
+    const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
+    const stageId = randomUUID();
+    await db.update(agents).set({
+      runtimeConfig: { heartbeat: { wakeOnDemand: false, maxConcurrentRuns: 1 } },
+    }).where(eq(agents.id, coderId));
+    await db.update(issues).set({
+      status: "in_review",
+      assigneeAgentId: managerId,
+      executionPolicy: {
+        mode: "normal",
+        commentRequired: true,
+        stages: [{
+          id: stageId,
+          type: "review",
+          participants: [{ id: randomUUID(), type: "agent", agentId: managerId, userId: null }],
+        }],
+      },
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: managerId },
+        returnAssignee: { type: "agent", agentId: coderId },
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+    }).where(eq(issues.id, sourceIssueId));
+    const recoveryActions = issueRecoveryActionService(db);
+    const action = await recoveryActions.upsertSourceScoped({
+      companyId,
+      sourceIssueId,
+      kind: "stranded_assigned_issue",
+      ownerType: "board",
+      previousOwnerAgentId: coderId,
+      cause: "stranded_assigned_issue",
+      fingerprint: "recovery-resolution:changes-requested",
+      nextAction: "Review the recovered execution path.",
+      wakePolicy: { type: "board_escalation" },
+    });
+    const app = createApp();
+    const body = {
+      actionId: action.id,
+      outcome: "restored",
+      sourceIssueStatus: "todo",
+      resolutionNote: "Address the remaining review findings.",
+    };
+
+    const resolved = await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send(body)
+      .expect(200);
+
+    expect(resolved.body.issue).toMatchObject({
+      id: sourceIssueId,
+      status: "in_progress",
+      assigneeAgentId: coderId,
+    });
+    await vi.waitFor(async () => {
+      const intents = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, companyId),
+            eq(agentWakeupRequests.requestedByActorId, "execution-stage-committer"),
+          ),
+        );
+      expect(intents).toHaveLength(1);
+      expect(intents[0]).toMatchObject({
+        agentId: coderId,
+        reason: "execution_changes_requested",
+        payload: expect.objectContaining({ issueId: sourceIssueId }),
+      });
+      expect(await recoveryActions.getActiveForIssue(companyId, sourceIssueId)).toMatchObject({
+        status: "active",
+        ownerType: "board",
+        returnOwnerAgentId: coderId,
+      });
+    });
+
+    await request(app)
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send(body)
+      .expect(200);
+    expect(
+      await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, companyId),
+            eq(agentWakeupRequests.requestedByActorId, "execution-stage-committer"),
+          ),
+        ),
+    ).toHaveLength(1);
+  });
+
   it("does not enqueue a restored wake when todo status and assignee are unchanged", async () => {
     const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
     await db
