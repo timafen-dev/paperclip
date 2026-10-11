@@ -2924,6 +2924,154 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
   });
 
+  it("blocks native recovery when an existing-branch override supersedes its persisted workspace", async () => {
+    const { companyId, agentId, issueId, runId } =
+      await seedQueuedIssueRunFixture();
+    const projectId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const staleWorkspaceId = randomUUID();
+    const staleBranch = "paperclip/ancestor-work";
+    const requestedBranch = "paperclip/required-pr-branch";
+    const cwd = await fs.mkdtemp(
+      path.join(os.tmpdir(), "paperclip-native-stale-workspace-"),
+    );
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Native recovery project",
+      status: "in_progress",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary repository",
+      sourceType: "local_path",
+      cwd,
+      repoRef: "main",
+      isPrimary: true,
+    });
+    await db.insert(executionWorkspaces).values({
+      id: staleWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      sourceIssueId: issueId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: staleBranch,
+      status: "active",
+      cwd,
+      repoUrl: null,
+      baseRef: "main",
+      branchName: staleBranch,
+      providerType: "git_worktree",
+      providerRef: cwd,
+    });
+    await db
+      .update(agents)
+      .set({
+        adapterType: "paperclip_runner",
+        adapterConfig: { provider: "codex", model: "gpt-5.6-luna" },
+      })
+      .where(eq(agents.id, agentId));
+    await db
+      .update(issues)
+      .set({
+        projectId,
+        projectWorkspaceId,
+        executionWorkspaceId: staleWorkspaceId,
+        executionWorkspacePreference: "reuse_existing",
+        executionWorkspaceSettings: {
+          mode: "isolated_workspace",
+          workspaceStrategy: {
+            type: "git_worktree",
+            baseRef: "main",
+            existingBranch: requestedBranch,
+          },
+        },
+      })
+      .where(eq(issues.id, issueId));
+    const nativeExecutionInput = buildNativeExecutionInput({
+      companyId,
+      runId,
+      agentId,
+      issue: {
+        id: issueId,
+        identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-1`,
+        title: "Retry transient Codex failure without blocking",
+        description:
+          "Verify the successful-run handoff and choose an honest disposition.",
+        workMode: "standard",
+      },
+      taskPrompt: "Resume the admitted native run.",
+      workspace: {
+        id: staleWorkspaceId,
+        cwd,
+        repoUrl: null,
+        repoRef: "main",
+        branchName: staleBranch,
+      },
+      normalizedSessionId: randomUUID(),
+      provider: "codex",
+      completionContract: {
+        id: randomUUID(),
+        sha256: `sha256:${"a".repeat(64)}`,
+        schemaVersion: "paperclip.run-result.v1",
+        contract: {
+          revision: "1",
+          objective: "Restore the admitted session only when its workspace remains valid.",
+          criteria: [{ id: "objective", requirement: "Use the required branch." }],
+        },
+      },
+      runtimeContext: nativeRuntimeContextFixture(),
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({
+        runtimeMode: "native",
+        runtimeModeResolvedAt: new Date(),
+        nativeIssueId: issueId,
+        runnerProfileJson: { nativeExecutionInput },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const nativeSessionBackendFactory = vi.fn(() => {
+      throw new Error("Provider must not be opened");
+    });
+    const heartbeat = heartbeatService(db, { nativeSessionBackendFactory });
+    await heartbeat.resumeQueuedRuns();
+    await waitForValue(
+      async () => (await heartbeat.getRun(runId))?.errorCode,
+      8_000,
+    );
+    await heartbeat.waitForRunExecutionDrain(runId);
+
+    expect(await heartbeat.getRun(runId)).toMatchObject({
+      status: "failed",
+      errorCode: "workspace_validation_failed",
+      resultJson: {
+        workspaceValidation: {
+          reason: "native_recovery_existing_branch_mismatch",
+          executionWorkspaceId: staleWorkspaceId,
+          requestedExistingBranch: requestedBranch,
+          existingExecutionWorkspaceBranchName: staleBranch,
+        },
+      },
+    });
+    expect(nativeSessionBackendFactory).not.toHaveBeenCalled();
+    expect(
+      await waitForValue(() =>
+        db
+          .select({ cause: issueRecoveryActions.cause, status: issueRecoveryActions.status })
+          .from(issueRecoveryActions)
+          .where(eq(issueRecoveryActions.sourceIssueId, issueId))
+          .then((rows) => rows[0] ?? null),
+      ),
+    ).toEqual({ cause: "workspace_validation_failed", status: "active" });
+  });
+
   it("holds admitted native chat with a legacy shared cwd without replacing input or releasing ownership", async () => {
     await withTempPaperclipHome(async () => {
       const { companyId, agentId, issueId, runId } =

@@ -21230,10 +21230,6 @@ export function heartbeatService(
       } else {
         delete context.paperclipTurnContext;
       }
-      // A native run's execution input is immutable once persisted. Recovery must therefore
-      // restore the workspace bound to that input rather than consulting the issue's current
-      // workspace pointer: a newer run may already have moved or cleared the issue binding while
-      // this older provider session is still recoverable.
       const persistedRunnerProfile = parseObject(run.runnerProfileJson);
       const persistedNativeExecutionInput =
         run.runtimeMode === "native" &&
@@ -21255,6 +21251,9 @@ export function heartbeatService(
           bindingId: persistedNativeExecutionWorkspaceId,
           persistedWorkspaceFound: existingExecutionWorkspace !== null,
         });
+      const requestedExistingBranch = readNonEmptyString(
+        issueExecutionWorkspaceSettings?.workspaceStrategy?.existingBranch,
+      );
       const workspaceReuseRequest =
         resolveExecutionWorkspaceReuseRequestForIssue({
           issueExecutionWorkspaceId: requestedExecutionWorkspaceId,
@@ -21263,13 +21262,31 @@ export function heartbeatService(
             : (issueRef?.executionWorkspacePreference ?? null),
           existingExecutionWorkspaceStatus:
             existingExecutionWorkspace?.status ?? null,
-          requestedExistingBranch: nativeRecoveryExecutionWorkspaceId
-            ? null
-            : (issueExecutionWorkspaceSettings?.workspaceStrategy
-                ?.existingBranch ?? null),
+          requestedExistingBranch,
           existingExecutionWorkspaceBranchName:
             existingExecutionWorkspace?.branchName ?? null,
         });
+      if (
+        nativeRecoveryExecutionWorkspaceId &&
+        requestedExistingBranch !== null &&
+        readNonEmptyString(existingExecutionWorkspace?.branchName) !==
+          requestedExistingBranch
+      ) {
+        throw new WorkspaceValidationFailure(
+          `Native recovery cannot restore execution workspace ${nativeRecoveryExecutionWorkspaceId} because issue ${issueRef?.identifier ?? issueRef?.id ?? issueId ?? "unknown"} now requires existing branch "${requestedExistingBranch}" instead of "${existingExecutionWorkspace?.branchName ?? "unrecorded"}". Retry the issue to realize the required branch.`,
+          {
+            workspaceValidation: {
+              reason: "native_recovery_existing_branch_mismatch",
+              issueId: issueRef?.id ?? null,
+              issueIdentifier: issueRef?.identifier ?? null,
+              executionWorkspaceId: nativeRecoveryExecutionWorkspaceId,
+              requestedExistingBranch,
+              existingExecutionWorkspaceBranchName:
+                existingExecutionWorkspace?.branchName ?? null,
+            },
+          },
+        );
+      }
       const requestedShouldReuseExisting =
         workspaceReuseRequest.requestedShouldReuseExisting;
       const reusableExistingExecutionWorkspace =
