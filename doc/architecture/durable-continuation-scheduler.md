@@ -8,7 +8,8 @@ creates another heartbeat run when the continuation becomes eligible.
 “Durable continuation scheduler” is a useful umbrella term, but it is not the
 name of one class or queue. Two related mechanisms provide the behavior:
 
-1. **Explicit continuation effects** are written by native status arbitration.
+1. **Explicit continuation and execution-stage return effects** are written by
+   native status arbitration or an execution-policy decision.
 2. **Stranded-issue reconciliation** is a startup and periodic safety net for an
    assigned open issue that has no live execution or durable wait path.
 
@@ -33,9 +34,9 @@ new recovery run normally appears within one scheduler interval. The interval
 is polling cadence, not a promise that every continuation waits exactly that
 long.
 
-Explicit native continuation effects do not need to wait for this scan. The
-native status-decision committer writes an idempotent `agent_wakeup_requests`
-row directly. The normal queued-run machinery then claims it.
+Explicit native continuation and execution-stage return effects do not need to
+wait for this scan. Their committers write idempotent `agent_wakeup_requests`
+rows directly. The normal queued-run machinery then claims them.
 
 ## What is durable
 
@@ -46,14 +47,15 @@ than an in-memory timer owned by an agent:
 - the issue execution lock/run identity;
 - heartbeat run status, context, retry ancestry, and terminal timestamps;
 - `agent_wakeup_requests` rows;
-- native status decisions and their materialized effects;
+- native status decisions, execution-policy return decisions, and their
+  materialized effects;
 - pending interactions, approvals, monitors, blockers, and execution stages;
 - scheduled retry timestamps and recovery actions.
 
 Because these records survive a process restart, startup reconciliation can
 resume queued work or repair an issue whose previous execution disappeared.
 
-## Explicit continuations
+## Explicit continuations and execution-stage returns
 
 A native result can report `yielded` with a continuation containing:
 
@@ -70,6 +72,12 @@ boundary.
 
 This is intentional continuation: the result explicitly says more work is
 needed and leaves a persisted execution path.
+
+An execution-policy `changes_requested` decision uses the same durable bridge:
+the decision and return-assignee wake intent commit together, then normal
+admission checks create the run. If dispatch is denied while the returned issue
+remains `in_progress`, the scheduler creates an idempotent board-owned recovery
+action that keeps the source assignee unchanged.
 
 ## Stranded-issue reconciliation
 

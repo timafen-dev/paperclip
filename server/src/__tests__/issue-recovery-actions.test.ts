@@ -2286,6 +2286,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
   it("persists one return wake when recovery resolution requests changes", async () => {
     const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
     const stageId = randomUUID();
+    const reviewerRunId = randomUUID();
     await db.update(agents).set({
       runtimeConfig: { heartbeat: { wakeOnDemand: false, maxConcurrentRuns: 1 } },
     }).where(eq(agents.id, coderId));
@@ -2313,6 +2314,16 @@ describeEmbeddedPostgres("issue recovery actions", () => {
         lastDecisionOutcome: null,
       },
     }).where(eq(issues.id, sourceIssueId));
+    await db.insert(heartbeatRuns).values({
+      id: reviewerRunId,
+      companyId,
+      agentId: managerId,
+      status: "running",
+      invocationSource: "manual",
+      scopeKind: "issue",
+      issueId: sourceIssueId,
+      contextSnapshot: { issueId: sourceIssueId },
+    });
     const recoveryActions = issueRecoveryActionService(db);
     const action = await recoveryActions.upsertSourceScoped({
       companyId,
@@ -2325,7 +2336,12 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       nextAction: "Review the recovered execution path.",
       wakePolicy: { type: "board_escalation" },
     });
-    const app = createApp();
+    const app = createApp({
+      type: "agent",
+      agentId: managerId,
+      companyId,
+      runId: reviewerRunId,
+    });
     const body = {
       actionId: action.id,
       outcome: "restored",
@@ -2366,7 +2382,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       });
     });
 
-    await request(app)
+    await request(createApp())
       .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
       .send(body)
       .expect(200);

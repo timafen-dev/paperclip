@@ -115,8 +115,15 @@ use that role to change ordinary task assignments or dependencies.
 
 Accepting the last required native completion review marks the child Done and
 makes its dependents eligible to continue. Rejection returns the requested
-changes to the worker. A review run that ends without a decision cannot mark
-the child Done. It retains the review and records a bounded recovery action.
+changes to the worker. The rejection decision, its execution-state transition,
+and one idempotent `execution_changes_requested` wake intent for the retained
+return assignee commit together, including when a recovery action resolution
+records the decision. The scheduler applies its normal admission checks only
+after that commit. If dispatch is denied while the returned issue remains
+`in_progress`, Paperclip creates an idempotent board-owned recovery action that
+preserves the source assignee rather than silently stranding the issue. A review
+run that ends without a decision cannot mark the child Done. It retains the
+review and records a bounded recovery action.
 See [native status arbitration](architecture/native-status-arbitration.md#agent-review-handoff)
 for the authorization checks and completion-report rules.
 
