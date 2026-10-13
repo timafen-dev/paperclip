@@ -148,11 +148,6 @@ export function escalatedReviewHandoffService(db: Db) {
           sourceIssue.assigneeAgentId === input.actor.agentId &&
           (sourceIssue.checkoutRunId === input.actor.runId ||
             sourceIssue.executionRunId === input.actor.runId);
-        if (!assignedRoutineRun || !sourceIssue) {
-          throw forbidden(
-            "An active assigned routine execution is required for an escalated review handoff",
-          );
-        }
 
         const existingWakeup = await tx
           .select()
@@ -206,6 +201,12 @@ export function escalatedReviewHandoffService(db: Db) {
             wakeup: existingWakeup,
             replayed: true,
           };
+        }
+
+        if (!assignedRoutineRun || !sourceIssue) {
+          throw forbidden(
+            "An active assigned routine execution is required for an escalated review handoff",
+          );
         }
 
         const policy = normalizeIssueExecutionPolicy(lockedIssue.executionPolicy);

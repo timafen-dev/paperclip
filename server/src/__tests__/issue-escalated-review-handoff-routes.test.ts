@@ -304,6 +304,8 @@ describeEmbeddedPostgres("escalated review handoff routes", () => {
     const actor = agentActor(seeded.companyId, seeded.routineAgentId, seeded.runId);
     const first = await request(app(actor))
       .post(`/api/issues/${seeded.targetIssueId}/escalated-review-handoff`).send(body);
+    await db.update(heartbeatRuns).set({ status: "succeeded" })
+      .where(eq(heartbeatRuns.id, seeded.runId));
     const second = await request(app(actor))
       .post(`/api/issues/${seeded.targetIssueId}/escalated-review-handoff`).send(body);
 
