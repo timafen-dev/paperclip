@@ -1754,6 +1754,15 @@ function applyDocumentFixups(document: any): any {
                 ? { actor: "board_or_agent" }
                 : { actor: "public" };
 
+      if (operationKey(method, path) === "POST /api/issues/{id}/stalled-review-decision") {
+        operation["x-paperclip-authorization"] = {
+          actor: "board_or_agent",
+          agent: {
+            heartbeatBound: true,
+            permission: "tasks:triage_stalled_review",
+          },
+        };
+      }
       const key = operationKey(method, path);
       if (authLevel !== "public") {
         const responses = (operation.responses ??= {}) as Record<
@@ -3963,6 +3972,7 @@ registry.registerPath({
   path: "/api/issues/{id}/stalled-review-decision",
   tags: ["issues"],
   summary: "Resolve a stalled issue review",
+  description: "Board callers keep the ordinary stalled-review decision flow. An agent caller requires an active authenticated run and the explicit tasks:triage_stalled_review grant. Agent callers may only request changes and must provide assigneeAgentId plus a stable idempotencyKey; the issue must still be an exhausted stalled review held by local-board.",
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(stalledReviewDecisionSchema),

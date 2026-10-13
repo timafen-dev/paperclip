@@ -905,6 +905,8 @@ export const stalledReviewDecisionSchema = z
   .object({
     action: z.enum(["approve", "request_changes", "send_back"]),
     note: multilineTextSchema.pipe(z.string().min(1)).optional(),
+    assigneeAgentId: z.string().guid().optional(),
+    idempotencyKey: z.string().trim().min(1).max(200).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -913,6 +915,13 @@ export const stalledReviewDecisionSchema = z
         code: z.ZodIssueCode.custom,
         path: ["note"],
         message: "Request changes requires a note",
+      });
+    }
+    if ((value.assigneeAgentId === undefined) !== (value.idempotencyKey === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: value.assigneeAgentId === undefined ? ["assigneeAgentId"] : ["idempotencyKey"],
+        message: "Agent handoff requires both assigneeAgentId and idempotencyKey",
       });
     }
   });
