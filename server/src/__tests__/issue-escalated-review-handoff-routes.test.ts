@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
 import { and, eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agentWakeupRequests,
@@ -12,6 +12,8 @@ import {
   heartbeatRuns,
   issueComments,
   issueExecutionDecisions,
+  issueRelations,
+  issueThreadInteractions,
   issues,
 } from "@paperclipai/db";
 import { errorHandler } from "../middleware/index.js";
@@ -20,6 +22,19 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+
+const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
+
+vi.mock("../services/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/index.js")>();
+  return {
+    ...actual,
+    heartbeatService: (...args: Parameters<typeof actual.heartbeatService>) => ({
+      ...actual.heartbeatService(...args),
+      wakeup: mockWakeup,
+    }),
+  };
+});
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported
@@ -36,14 +51,17 @@ describeEmbeddedPostgres("escalated review handoff routes", () => {
   }, 30_000);
 
   afterEach(async () => {
+    await db.delete(issueThreadInteractions);
     await db.delete(issueExecutionDecisions);
     await db.delete(issueComments);
     await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
+    await db.delete(issueRelations);
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(companies);
+    mockWakeup.mockClear();
   });
 
   afterAll(async () => tempDb?.cleanup());
@@ -62,6 +80,21 @@ describeEmbeddedPostgres("escalated review handoff routes", () => {
 
   function agentActor(companyId: string, agentId: string, runId: string) {
     return { type: "agent", source: "agent_key", companyId, agentId, runId };
+  }
+
+  function boardActor(companyId: string) {
+    return {
+      type: "board",
+      source: "session",
+      userId: "local-board",
+      companyIds: [companyId],
+      memberships: [{
+        companyId,
+        status: "active",
+        membershipRole: "operator",
+      }],
+      isInstanceAdmin: false,
+    };
   }
 
   async function seed() {
@@ -224,6 +257,205 @@ describeEmbeddedPostgres("escalated review handoff routes", () => {
         previousReturnAssigneeAgentId: seeded.previousAgentId,
         assigneeAgentId: seeded.seniorAgentId,
       },
+    });
+  });
+
+  it("keeps an exhausted review blocked and wakes the new assignee only after its blocker resolves", async () => {
+    const seeded = await seed();
+    const blockerIssueId = randomUUID();
+    const interactionId = randomUUID();
+    await db.insert(issues).values({
+      id: blockerIssueId,
+      companyId: seeded.companyId,
+      identifier: "ERH-3",
+      title: "Unresolved dependency",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: seeded.routineAgentId,
+    });
+    await db.insert(issueRelations).values({
+      companyId: seeded.companyId,
+      issueId: blockerIssueId,
+      relatedIssueId: seeded.targetIssueId,
+      type: "blocks",
+    });
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId,
+      companyId: seeded.companyId,
+      issueId: seeded.targetIssueId,
+      kind: "ask_user_questions",
+      status: "pending",
+      continuationPolicy: "wake_assignee",
+      requestedResolverPolicy: "human_only",
+      effectiveResolverPolicy: "human_only",
+      resolverPolicyProvenance: "explicit",
+      payload: {
+        version: 1,
+        questions: [{
+          id: "approval",
+          prompt: "Which action can continue?",
+          selectionMode: "single",
+          required: true,
+          options: [{ id: "continue", label: "Continue" }],
+        }],
+      },
+    });
+
+    const actor = agentActor(seeded.companyId, seeded.routineAgentId, seeded.runId);
+    const response = await request(app(actor))
+      .post(`/api/issues/${seeded.targetIssueId}/escalated-review-handoff`)
+      .send({
+        assigneeAgentId: seeded.seniorAgentId,
+        comment: "Keep the dependency and transfer the exhausted review.",
+        idempotencyKey: randomUUID(),
+      });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body).toMatchObject({
+      replayed: false,
+      issue: {
+        id: seeded.targetIssueId,
+        status: "blocked",
+        assigneeAgentId: seeded.seniorAgentId,
+        assigneeUserId: null,
+      },
+      wakeup: {
+        agentId: seeded.seniorAgentId,
+        status: "completed",
+        reason: "escalated_review_handoff_blocked_receipt",
+      },
+    });
+    expect(await db.select().from(issueRelations).where(and(
+      eq(issueRelations.issueId, blockerIssueId),
+      eq(issueRelations.relatedIssueId, seeded.targetIssueId),
+    ))).toHaveLength(1);
+    expect(await db.select().from(issueThreadInteractions).where(eq(
+      issueThreadInteractions.id,
+      interactionId,
+    ))).toEqual([
+      expect.objectContaining({
+        status: "pending",
+        effectiveResolverPolicy: "human_only",
+      }),
+    ]);
+    expect(await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.agentId, seeded.seniorAgentId),
+      eq(agentWakeupRequests.status, "queued"),
+    ))).toHaveLength(0);
+    expect(mockWakeup).not.toHaveBeenCalled();
+
+    const blockerDone = await request(app(actor))
+      .patch(`/api/issues/${blockerIssueId}`)
+      .send({ status: "done" });
+    expect(blockerDone.status, JSON.stringify(blockerDone.body)).toBe(200);
+    await vi.waitFor(() => {
+      expect(mockWakeup).toHaveBeenCalledWith(
+        seeded.seniorAgentId,
+        expect.objectContaining({
+          reason: "issue_blockers_resolved",
+          payload: expect.objectContaining({
+            issueId: seeded.targetIssueId,
+            resolvedBlockerIssueId: blockerIssueId,
+          }),
+        }),
+      );
+    });
+  });
+
+  it("recovers an exhausted review closed by an agent-authored stalled approval", async () => {
+    const seeded = await seed();
+    const actor = agentActor(seeded.companyId, seeded.routineAgentId, seeded.runId);
+    const approval = await request(app(actor))
+      .post(`/api/issues/${seeded.targetIssueId}/stalled-review-decision`)
+      .send({ action: "approve", note: "Routine approval before handoff recovery." });
+    expect(approval.status, JSON.stringify(approval.body)).toBe(200);
+    expect(approval.body.issue).toMatchObject({
+      id: seeded.targetIssueId,
+      status: "done",
+      assigneeAgentId: null,
+      assigneeUserId: "local-board",
+    });
+
+    const handoff = await request(app(actor))
+      .post(`/api/issues/${seeded.targetIssueId}/escalated-review-handoff`)
+      .send({
+        assigneeAgentId: seeded.seniorAgentId,
+        comment: "Recover the exhausted review from the routine approval.",
+        idempotencyKey: randomUUID(),
+      });
+
+    expect(handoff.status, JSON.stringify(handoff.body)).toBe(200);
+    expect(handoff.body).toMatchObject({
+      replayed: false,
+      issue: {
+        id: seeded.targetIssueId,
+        status: "in_progress",
+        assigneeAgentId: seeded.seniorAgentId,
+        assigneeUserId: null,
+      },
+    });
+  });
+
+  it("does not reopen a board-completed exhausted review", async () => {
+    const seeded = await seed();
+    await db.update(issues).set({ status: "done", completedAt: new Date() })
+      .where(eq(issues.id, seeded.targetIssueId));
+
+    const response = await request(app(agentActor(
+      seeded.companyId,
+      seeded.routineAgentId,
+      seeded.runId,
+    )))
+      .post(`/api/issues/${seeded.targetIssueId}/escalated-review-handoff`)
+      .send({
+        assigneeAgentId: seeded.seniorAgentId,
+        comment: "This completion has no agent approval proof.",
+        idempotencyKey: randomUUID(),
+      });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(409);
+    expect(response.body.details).toMatchObject({
+      code: "issue_not_exhausted_escalated_review",
+    });
+    expect(await db.select().from(issues).where(eq(issues.id, seeded.targetIssueId))).toEqual([
+      expect.objectContaining({
+        status: "done",
+        assigneeAgentId: null,
+        assigneeUserId: "local-board",
+      }),
+    ]);
+  });
+
+  it("does not reuse an old agent approval after a later board completion", async () => {
+    const seeded = await seed();
+    const actor = agentActor(seeded.companyId, seeded.routineAgentId, seeded.runId);
+    const approval = await request(app(actor))
+      .post(`/api/issues/${seeded.targetIssueId}/stalled-review-decision`)
+      .send({ action: "approve", note: "Earlier agent approval." });
+    expect(approval.status, JSON.stringify(approval.body)).toBe(200);
+
+    await db.update(issues).set({ status: "in_review", completedAt: null })
+      .where(eq(issues.id, seeded.targetIssueId));
+    const boardCompletion = await request(app({
+      ...boardActor(seeded.companyId),
+      source: "local_implicit",
+    }))
+      .post(`/api/issues/${seeded.targetIssueId}/stalled-review-decision`)
+      .send({ action: "approve", note: "Later board approval." });
+    expect(boardCompletion.status, JSON.stringify(boardCompletion.body)).toBe(200);
+    expect(boardCompletion.body.issue).toMatchObject({ status: "done" });
+
+    const response = await request(app(actor))
+      .post(`/api/issues/${seeded.targetIssueId}/escalated-review-handoff`)
+      .send({
+        assigneeAgentId: seeded.seniorAgentId,
+        comment: "An old agent approval must not recover a later completion.",
+        idempotencyKey: randomUUID(),
+      });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(409);
+    expect(response.body.details).toMatchObject({
+      code: "issue_not_exhausted_escalated_review",
     });
   });
 
