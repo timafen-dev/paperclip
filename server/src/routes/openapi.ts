@@ -3983,7 +3983,7 @@ registry.registerPath({
   tags: ["issues"],
   summary: "Hand an exhausted escalated review to another agent",
   description:
-    "Available only to the authenticated run of an assigned routine-execution issue. Atomically records a changes-requested decision and agent-authored comment, clears the user assignment, assigns the requested agent, writes an audit entry, and queues one issue_assigned wakeup. The idempotency key is scoped to the target issue; an exact retry returns replayed=true and the original receipt.",
+    "Available only to the authenticated run of an assigned routine-execution issue. Atomically records a changes-requested decision and agent-authored comment, clears the user assignment, assigns the requested agent, and writes an audit entry. A ready issue returns to in_progress and queues one issue_assigned wakeup. An issue with unresolved blockers stays blocked and receives a completed handoff receipt; the normal blocker-resolution path wakes its new assignee later. A terminal issue can be recovered only when its exhausted review state remains and an agent-authored stalled-review approval is present in its audit history. The idempotency key is scoped to the target issue; an exact retry returns replayed=true and the original receipt.",
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(escalatedReviewHandoffSchema),

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import {
+  activityLog,
   agentWakeupRequests,
   heartbeatRuns,
   issueComments,
@@ -75,6 +76,20 @@ function receiptPayload(value: unknown) {
     sourceRunId: readString(payload.sourceRunId),
     requestHash: readString(payload.requestHash),
   };
+}
+
+function isAgentStalledReviewApproval(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const details = value as Record<string, unknown>;
+  const previous = details._previous;
+  return (
+    details.action === "approve" &&
+    details.status === "done" &&
+    previous != null &&
+    typeof previous === "object" &&
+    !Array.isArray(previous) &&
+    (previous as Record<string, unknown>).status === "in_review"
+  );
 }
 
 export function escalatedReviewHandoffService(db: Db) {
@@ -218,8 +233,7 @@ export function escalatedReviewHandoffService(db: Db) {
         const stage = policy?.stages.find(
           (candidate) => candidate.id === state?.currentStageId,
         );
-        const isExhaustedEscalatedReview =
-          lockedIssue.status === "in_review" &&
+        const hasExhaustedEscalatedReviewState =
           lockedIssue.assigneeAgentId === null &&
           lockedIssue.assigneeUserId != null &&
           state?.status === "pending" &&
@@ -229,7 +243,46 @@ export function escalatedReviewHandoffService(db: Db) {
           state.currentParticipant.userId === lockedIssue.assigneeUserId &&
           state.lastDecisionOutcome === "changes_requested" &&
           (state.changesRequestedCount ?? 0) >= maxReviewRounds;
-        if (!isExhaustedEscalatedReview || !state || !stage) {
+        const terminalActivities = lockedIssue.status === "done"
+          ? await tx
+              .select({
+                action: activityLog.action,
+                actorType: activityLog.actorType,
+                agentId: activityLog.agentId,
+                runId: activityLog.runId,
+                details: activityLog.details,
+                createdAt: activityLog.createdAt,
+              })
+              .from(activityLog)
+              .where(
+                and(
+                  eq(activityLog.companyId, input.companyId),
+                  eq(activityLog.entityType, "issue"),
+                  eq(activityLog.entityId, lockedIssue.id),
+                ),
+              )
+          : [];
+        const latestTerminalActivity = terminalActivities
+          .filter((entry) => {
+            if (!entry.details || typeof entry.details !== "object") return false;
+            return (entry.details as Record<string, unknown>).status === "done";
+          })
+          .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
+        const hasAgentStalledReviewApproval =
+          latestTerminalActivity?.action === "issue.stalled_review_decided" &&
+          latestTerminalActivity.actorType === "agent" &&
+          latestTerminalActivity.agentId != null &&
+          latestTerminalActivity.runId != null &&
+          isAgentStalledReviewApproval(latestTerminalActivity.details);
+        const isRecoverableStatus =
+          lockedIssue.status === "in_review" ||
+          (lockedIssue.status === "done" && hasAgentStalledReviewApproval);
+        if (
+          !hasExhaustedEscalatedReviewState ||
+          !isRecoverableStatus ||
+          !state ||
+          !stage
+        ) {
           throw conflict("Issue is not an exhausted escalated review", {
             code: "issue_not_exhausted_escalated_review",
             issueId: lockedIssue.id,
@@ -237,6 +290,13 @@ export function escalatedReviewHandoffService(db: Db) {
         }
 
         const decisionId = randomUUID();
+        const dependencyReadiness = await svc.getDependencyReadiness(
+          lockedIssue.id,
+          tx,
+        );
+        const nextStatus = dependencyReadiness.isDependencyReady
+          ? "in_progress"
+          : "blocked";
         const comment = await svc.addComment(
           lockedIssue.id,
           input.comment.trim(),
@@ -265,7 +325,7 @@ export function escalatedReviewHandoffService(db: Db) {
         const updated = await svc.update(
           lockedIssue.id,
           {
-            status: "in_progress",
+            status: nextStatus,
             assigneeAgentId: input.assigneeAgentId,
             assigneeUserId: null,
             executionState: {
@@ -291,6 +351,7 @@ export function escalatedReviewHandoffService(db: Db) {
         );
         if (!updated) throw notFound("Issue not found");
 
+        const blocked = nextStatus === "blocked";
         const [wakeup] = await tx
           .insert(agentWakeupRequests)
           .values({
@@ -298,7 +359,11 @@ export function escalatedReviewHandoffService(db: Db) {
             agentId: input.assigneeAgentId,
             source: "automation",
             triggerDetail: "system",
-            reason: "issue_assigned",
+            reason: blocked
+              ? "escalated_review_handoff_blocked_receipt"
+              : "issue_assigned",
+            status: blocked ? "completed" : "queued",
+            finishedAt: blocked ? new Date() : null,
             requestedByActorType: "agent",
             requestedByActorId: input.actor.agentId,
             idempotencyKey: namespacedIdempotencyKey,
