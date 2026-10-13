@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
 import { issueService } from "../services/issues.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
+import { activityService } from "../services/activity.js";
 import { adapterExecutionControls, createAdapterExecutionControl } from "../services/adapter-execution-control.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
@@ -2537,6 +2538,130 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(checkoutReleasedIssue?.checkoutRunId).toBeNull();
   });
 
+  it("terminalizes a lost legacy controller through its issue lock when context attribution is absent", async () => {
+    const { companyId, agentId, issueId, runId } = await seedRunFixture({
+      agentStatus: "idle",
+      processPid: 999_999_999,
+      processLossRetryCount: 1,
+    });
+    // Model the historical state exactly: the issue still owns the run, but
+    // the legacy controller lost its context/session record before dispatch
+    // could write a terminal outcome.
+    await db
+      .update(heartbeatRuns)
+      .set({ contextSnapshot: {} })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const result = await heartbeatService(db).reapOrphanedRuns();
+
+    expect(result).toEqual({ reaped: 1, runIds: [runId] });
+    expect(await heartbeatService(db).getRun(runId)).toMatchObject({
+      status: "failed",
+      errorCode: "process_lost",
+    });
+    await expect(
+      db
+        .select({ executionRunId: issues.executionRunId, checkoutRunId: issues.checkoutRunId })
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId))),
+    ).resolves.toEqual([{ executionRunId: null, checkoutRunId: null }]);
+    await expect(
+      db
+        .select({ evidence: issueRecoveryActions.evidence })
+        .from(issueRecoveryActions)
+        .where(
+          and(
+            eq(issueRecoveryActions.companyId, companyId),
+            eq(issueRecoveryActions.sourceIssueId, issueId),
+          ),
+        ),
+    ).resolves.toEqual([expect.objectContaining({ evidence: expect.objectContaining({ runId }) })]);
+    const [runtime, sessions, history] = await Promise.all([
+      heartbeatService(db).getRuntimeState(agentId),
+      heartbeatService(db).listTaskSessions(agentId),
+      activityService(db).runsForIssue(companyId, issueId),
+    ]);
+    expect(runtime).toMatchObject({ sessionId: null, lastRunId: null });
+    expect(sessions).toEqual([]);
+    expect(history).toEqual([
+      expect.objectContaining({
+        runId,
+        status: "failed",
+        errorCode: "process_lost",
+        contextIssueId: null,
+      }),
+    ]);
+  });
+
+  it("does not terminalize a lost legacy controller while its first process-loss retry is scheduled", async () => {
+    const { companyId, agentId, issueId, runId } = await seedRunFixture({
+      agentStatus: "idle",
+      processPid: 999_999_999,
+      processLossRetryCount: 0,
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({ contextSnapshot: {} })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const result = await heartbeatService(db).reapOrphanedRuns();
+
+    expect(result).toEqual({ reaped: 1, runIds: [runId] });
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs.filter((row) => row.retryOfRunId === runId)).toHaveLength(1);
+    await expect(
+      db
+        .select()
+        .from(issueRecoveryActions)
+        .where(
+          and(
+            eq(issueRecoveryActions.companyId, companyId),
+            eq(issueRecoveryActions.sourceIssueId, issueId),
+          ),
+        ),
+    ).resolves.toEqual([]);
+  });
+
+  it("refuses to reconcile a lock-owned legacy run while its controller lease is live", async () => {
+    const { companyId, agentId, issueId, runId } = await seedRunFixture({
+      agentStatus: "idle",
+      processPid: 999_999_999,
+    });
+    const leaseExpiry = new Date(Date.now() + 60_000);
+    await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: {},
+        controllerBootId: randomUUID(),
+        controllerLeaseExpiresAt: leaseExpiry,
+      })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const heartbeat = heartbeatService(db);
+    const [runtime, sessions, history, result] = await Promise.all([
+      heartbeat.getRuntimeState(agentId),
+      heartbeat.listTaskSessions(agentId),
+      activityService(db).runsForIssue(companyId, issueId),
+      heartbeat.reapOrphanedRuns(),
+    ]);
+
+    expect(runtime).toMatchObject({ sessionId: null, lastRunId: null });
+    expect(sessions).toEqual([]);
+    expect(history).toEqual([
+      expect.objectContaining({ runId, status: "running", contextIssueId: null }),
+    ]);
+    expect(result).toEqual({ reaped: 0, runIds: [] });
+    await expect(
+      db
+        .select({ executionRunId: issues.executionRunId, checkoutRunId: issues.checkoutRunId })
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId))),
+    ).resolves.toEqual([{ executionRunId: runId, checkoutRunId: runId }]);
+  });
+
   it("requires reconciliation for a lost monitor whose provider outcomes are unknown", async () => {
     const { agentId, runId, issueId } = await seedRunFixture({
       adapterType: "openclaw_gateway",
@@ -2797,6 +2922,160 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         source: { ...source, location: "task.prompt" },
       }]);
     });
+  });
+
+  it("blocks native recovery when an existing-branch override supersedes its persisted workspace", async () => {
+    const { companyId, agentId, issueId, runId } =
+      await seedQueuedIssueRunFixture();
+    // Issue-level workspace overrides are intentionally inert unless this
+    // operator feature is enabled, just as they are in a running instance.
+    await instanceSettingsService(db).updateExperimental({
+      enableIsolatedWorkspaces: true,
+      enableIsolatedWorkspacesByDefault: false,
+    });
+    const projectId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const staleWorkspaceId = randomUUID();
+    const staleBranch = "paperclip/ancestor-work";
+    const requestedBranch = "paperclip/required-pr-branch";
+    const cwd = await fs.mkdtemp(
+      path.join(os.tmpdir(), "paperclip-native-stale-workspace-"),
+    );
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Native recovery project",
+      status: "in_progress",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary repository",
+      sourceType: "local_path",
+      cwd,
+      repoRef: "main",
+      isPrimary: true,
+    });
+    await db.insert(executionWorkspaces).values({
+      id: staleWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      sourceIssueId: issueId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: staleBranch,
+      status: "active",
+      cwd,
+      repoUrl: null,
+      baseRef: "main",
+      branchName: staleBranch,
+      providerType: "git_worktree",
+      providerRef: cwd,
+    });
+    await db
+      .update(agents)
+      .set({
+        adapterType: "paperclip_runner",
+        adapterConfig: { provider: "codex", model: "gpt-5.6-luna" },
+      })
+      .where(eq(agents.id, agentId));
+    await db
+      .update(issues)
+      .set({
+        projectId,
+        projectWorkspaceId,
+        executionWorkspaceId: staleWorkspaceId,
+        executionWorkspacePreference: "reuse_existing",
+        executionWorkspaceSettings: {
+          mode: "isolated_workspace",
+          workspaceStrategy: {
+            type: "git_worktree",
+            baseRef: "main",
+            existingBranch: requestedBranch,
+          },
+        },
+      })
+      .where(eq(issues.id, issueId));
+    const nativeExecutionInput = buildNativeExecutionInput({
+      companyId,
+      runId,
+      agentId,
+      issue: {
+        id: issueId,
+        identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-1`,
+        title: "Retry transient Codex failure without blocking",
+        description:
+          "Verify the successful-run handoff and choose an honest disposition.",
+        workMode: "standard",
+      },
+      taskPrompt: "Resume the admitted native run.",
+      workspace: {
+        id: staleWorkspaceId,
+        cwd,
+        repoUrl: null,
+        repoRef: "main",
+        branchName: staleBranch,
+      },
+      normalizedSessionId: randomUUID(),
+      provider: "codex",
+      completionContract: {
+        id: randomUUID(),
+        sha256: `sha256:${"a".repeat(64)}`,
+        schemaVersion: "paperclip.run-result.v1",
+        contract: {
+          revision: "1",
+          objective: "Restore the admitted session only when its workspace remains valid.",
+          criteria: [{ id: "objective", requirement: "Use the required branch." }],
+        },
+      },
+      runtimeContext: nativeRuntimeContextFixture(),
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({
+        runtimeMode: "native",
+        runtimeModeResolvedAt: new Date(),
+        nativeIssueId: issueId,
+        runnerProfileJson: { nativeExecutionInput },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const nativeSessionBackendFactory = vi.fn(() => {
+      throw new Error("Provider must not be opened");
+    });
+    const heartbeat = heartbeatService(db, { nativeSessionBackendFactory });
+    await heartbeat.resumeQueuedRuns();
+    await waitForValue(
+      async () => (await heartbeat.getRun(runId))?.errorCode,
+      8_000,
+    );
+    await heartbeat.waitForRunExecutionDrain(runId);
+
+    expect(await heartbeat.getRun(runId)).toMatchObject({
+      status: "failed",
+      errorCode: "workspace_validation_failed",
+      resultJson: {
+        workspaceValidation: {
+          reason: "native_recovery_existing_branch_mismatch",
+          executionWorkspaceId: staleWorkspaceId,
+          requestedExistingBranch: requestedBranch,
+          existingExecutionWorkspaceBranchName: staleBranch,
+        },
+      },
+    });
+    expect(nativeSessionBackendFactory).not.toHaveBeenCalled();
+    expect(
+      await waitForValue(() =>
+        db
+          .select({ cause: issueRecoveryActions.cause, status: issueRecoveryActions.status })
+          .from(issueRecoveryActions)
+          .where(eq(issueRecoveryActions.sourceIssueId, issueId))
+          .then((rows) => rows[0] ?? null),
+      ),
+    ).toEqual({ cause: "workspace_validation_failed", status: "active" });
   });
 
   it("holds admitted native chat with a legacy shared cwd without replacing input or releasing ownership", async () => {

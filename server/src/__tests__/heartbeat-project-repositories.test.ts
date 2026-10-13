@@ -7,7 +7,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, companies, createDb, environments, executionWorkspaces, heartbeatRuns, issues, projects, projectWorkspaces } from "@paperclipai/db";
-import { setExpensiveWorkspaceGitExecutor } from "@paperclipai/adapter-utils/git-workspace-sync";
+import { runLocalGit, setExpensiveWorkspaceGitExecutor } from "@paperclipai/adapter-utils/git-workspace-sync";
 import { buildProjectMentionHref } from "@paperclipai/shared";
 import { createWorkspaceGitOperationScheduler, WorkspaceGitScanError } from "../services/workspace-git-operation-scheduler.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -36,12 +36,14 @@ suite("task project repository provisioning", () => {
     vi.stubEnv("PAPERCLIP_MULTI_PROJECT_WORKSPACE_SYNC", "false");
     database = await startEmbeddedPostgresTestDatabase("project-repositories");
     db = createDb(database.connectionString);
-    heartbeat = heartbeatService(db);
+    heartbeat = heartbeatService(db, {
+      runtimeEnv: { ...process.env, PAPERCLIP_IN_WORKTREE: "false" },
+    });
     execute.mockImplementation(async (input) => {
       await db.update(issues).set({ status: "done" }).where(eq(issues.id, input.context.issueId));
       return { exitCode: 0, signal: null, timedOut: false };
     });
-  }, 30_000);
+  }, 60_000);
   afterAll(async () => {
     if (db && heartbeat) await drainHeartbeatRunsToQuiescence(db, heartbeat);
     await db?.$client.end({ timeout: 5 });
@@ -189,6 +191,178 @@ suite("task project repository provisioning", () => {
         expect(workspace.cwd).toContain(`${projectId}/_default`);
       }
     }
+  }, 25_000);
+
+  it("replaces an inherited ancestor workspace when the child pins a different existing branch", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const agentId = randomUUID();
+    const ancestorIssueId = randomUUID();
+    const childIssueId = randomUUID();
+    const staleWorkspaceId = randomUUID();
+    const issuePrefix = `R${companyId.slice(0, 6)}`;
+    const source = path.join(root, companyId, "stale-existing-branch-source");
+    const worktreeParentDir = path.join(root, companyId, "managed-worktrees");
+    const staleWorktree = path.join(root, companyId, "ancestor-worktree");
+    const staleBranch = "paperclip/ancestor-completed-work";
+    const requestedBranch = "paperclip/pr-260-continuation";
+
+    await mkdir(source, { recursive: true });
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: source, stdio: "ignore" });
+    git("init", "-b", "main");
+    await writeFile(path.join(source, "README.md"), "workspace inheritance regression\n");
+    git("add", ".");
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "seed");
+    git("branch", staleBranch);
+    git("branch", requestedBranch);
+    await mkdir(path.dirname(staleWorktree), { recursive: true });
+    git("worktree", "add", staleWorktree, staleBranch);
+
+    await instanceSettingsService(db).updateExperimental({
+      enableIsolatedWorkspaces: true,
+      enableIsolatedWorkspacesByDefault: false,
+    });
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Existing branch regression",
+      issuePrefix,
+      defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Existing branch project",
+      status: "in_progress",
+      executionWorkspacePolicy: {
+        enabled: true,
+        defaultMode: "isolated_workspace",
+        allowIssueOverride: true,
+        defaultProjectWorkspaceId: projectWorkspaceId,
+        workspaceStrategy: {
+          type: "git_worktree",
+          baseRef: "main",
+          branchTemplate: "paperclip/{{issue.identifier}}-{{slug}}",
+          worktreeParentDir,
+        },
+      },
+    });
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary repository",
+      sourceType: "local_path",
+      cwd: source,
+      repoRef: "main",
+      isPrimary: true,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "ExistingBranchAgent",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: ancestorIssueId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      title: "Completed ancestor",
+      status: "done",
+      assigneeAgentId: agentId,
+    });
+    await db.insert(executionWorkspaces).values({
+      id: staleWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      sourceIssueId: ancestorIssueId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: staleBranch,
+      status: "active",
+      cwd: staleWorktree,
+      repoUrl: null,
+      baseRef: "main",
+      branchName: staleBranch,
+      providerType: "git_worktree",
+      providerRef: staleWorktree,
+    });
+    await db
+      .update(issues)
+      .set({
+        executionWorkspaceId: staleWorkspaceId,
+        executionWorkspacePreference: "reuse_existing",
+        executionWorkspaceSettings: { mode: "isolated_workspace" },
+      })
+      .where(eq(issues.id, ancestorIssueId));
+    await db.insert(issues).values({
+      id: childIssueId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      parentId: ancestorIssueId,
+      title: "Continue the PR on its existing branch",
+      status: "todo",
+      assigneeAgentId: agentId,
+      executionWorkspaceId: staleWorkspaceId,
+      executionWorkspacePreference: "reuse_existing",
+      executionWorkspaceSettings: {
+        mode: "isolated_workspace",
+        workspaceStrategy: {
+          type: "git_worktree",
+          baseRef: "main",
+          existingBranch: requestedBranch,
+          worktreeParentDir,
+        },
+      },
+    });
+
+    const run = await heartbeat.invoke(
+      agentId,
+      "assignment",
+      { issueId: childIssueId, projectId, wakeReason: "issue_assigned" },
+      "system",
+    );
+    expect(run).not.toBeNull();
+    await vi.waitFor(async () => {
+      expect((await heartbeat.getRun(run!.id))?.status).toBe("succeeded");
+    }, { timeout: 15_000 });
+
+    const [adapterInput] = execute.mock.calls.find(
+      ([input]) => input.runId === run!.id,
+    )!;
+    expect(adapterInput.context.paperclipWorkspace).toMatchObject({
+      branchName: requestedBranch,
+    });
+    expect(
+      execFileSync("git", ["branch", "--show-current"], {
+        cwd: adapterInput.context.paperclipWorkspace.cwd,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(requestedBranch);
+
+    const [updatedIssue] = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, childIssueId));
+    expect(updatedIssue?.executionWorkspaceId).not.toBe(staleWorkspaceId);
+    const [replacementWorkspace] = await db
+      .select()
+      .from(executionWorkspaces)
+      .where(eq(executionWorkspaces.id, updatedIssue!.executionWorkspaceId!));
+    expect(replacementWorkspace).toMatchObject({
+      sourceIssueId: childIssueId,
+      branchName: requestedBranch,
+      status: "active",
+    });
   }, 25_000);
 
   it.each([
