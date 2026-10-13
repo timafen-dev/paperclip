@@ -434,15 +434,16 @@ describeEmbeddedPostgres("escalated review handoff routes", () => {
       .send({ action: "approve", note: "Earlier agent approval." });
     expect(approval.status, JSON.stringify(approval.body)).toBe(200);
 
-    const board = app(boardActor(seeded.companyId));
-    const reopened = await request(board)
-      .patch(`/api/issues/${seeded.targetIssueId}`)
-      .send({ status: "in_review" });
-    expect(reopened.status, JSON.stringify(reopened.body)).toBe(200);
-    const boardCompletion = await request(board)
-      .patch(`/api/issues/${seeded.targetIssueId}`)
-      .send({ status: "done" });
+    await db.update(issues).set({ status: "in_review", completedAt: null })
+      .where(eq(issues.id, seeded.targetIssueId));
+    const boardCompletion = await request(app({
+      ...boardActor(seeded.companyId),
+      source: "local_implicit",
+    }))
+      .post(`/api/issues/${seeded.targetIssueId}/stalled-review-decision`)
+      .send({ action: "approve", note: "Later board approval." });
     expect(boardCompletion.status, JSON.stringify(boardCompletion.body)).toBe(200);
+    expect(boardCompletion.body.issue).toMatchObject({ status: "done" });
 
     const response = await request(app(actor))
       .post(`/api/issues/${seeded.targetIssueId}/escalated-review-handoff`)
