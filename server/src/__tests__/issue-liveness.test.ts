@@ -538,6 +538,41 @@ describe("issue graph liveness classifier", () => {
     }
   });
 
+  it("does not treat the local-board routing sentinel as a human review path", () => {
+    const findings = classifyIssueGraphLiveness({
+      issues: [
+        issue({
+          id: "local-board-review",
+          identifier: "PAP-LOCAL-BOARD",
+          title: "Exhausted review held by the board sentinel",
+          status: "in_review",
+          assigneeAgentId: null,
+          assigneeUserId: "local-board",
+          executionState: {
+            status: "pending",
+            currentStageId: "stage-1",
+            currentStageIndex: 0,
+            currentStageType: "review",
+            currentParticipant: { type: "user", userId: "local-board" },
+            returnAssignee: { type: "agent", agentId: coderId },
+            completedStageIds: [],
+            lastDecisionId: "decision-2",
+            lastDecisionOutcome: "changes_requested",
+            changesRequestedCount: 2,
+          },
+        }),
+      ],
+      relations: [],
+      agents: [agent(), manager],
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      issueId: "local-board-review",
+      state: "invalid_review_participant",
+    });
+  });
+
   it("does not treat a participant retained after changes are requested as an active review path", () => {
     const reviewIssueId = "review-1";
 

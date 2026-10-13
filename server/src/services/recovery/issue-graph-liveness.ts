@@ -223,7 +223,7 @@ export function classifyIssueReviewPaths(
     return [{ kind: "human_reviewer", ref: issue.conversationUserId, userId: issue.conversationUserId, agentId: null, since: null }];
   }
 
-  if (issue.assigneeUserId) {
+  if (issue.assigneeUserId && issue.assigneeUserId !== "local-board") {
     paths.push({
       kind: "human_reviewer",
       ref: issue.assigneeUserId,
@@ -314,7 +314,8 @@ function readPrincipalAgentId(principal: unknown): string | null {
 function principalIsResolvableUser(principal: unknown): boolean {
   if (!principal || typeof principal !== "object") return false;
   const value = principal as Record<string, unknown>;
-  return value.type === "user" && typeof value.userId === "string" && value.userId.length > 0;
+  return value.type === "user" && typeof value.userId === "string" &&
+    value.userId.length > 0 && value.userId !== "local-board";
 }
 
 function addOwnerCandidate(

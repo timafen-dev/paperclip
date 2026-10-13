@@ -2045,6 +2045,20 @@
       "when": 1790796608171,
       "tag": "0293_broad_rattler",
       "breakpoints": true
+    },
+    {
+      "idx": 294,
+      "version": "7",
+      "when": 1791875878421,
+      "tag": "0294_lowly_fenris",
+      "breakpoints": true
+    },
+    {
+      "idx": 295,
+      "version": "7",
+      "when": 1791881193312,
+      "tag": "0295_flaky_saracen",
+      "breakpoints": true
     }
   ]
 }

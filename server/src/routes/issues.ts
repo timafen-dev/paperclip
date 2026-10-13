@@ -286,7 +286,10 @@ import {
   readAcceptedPlanConfirmationTarget,
   type IssuePostCommitAction,
 } from "../services/issues.js";
-import { authorizationDeniedDetails } from "../services/authorization.js";
+import {
+  authorizationService,
+  authorizationDeniedDetails,
+} from "../services/authorization.js";
 import { stalledReviewDecisionService } from "../services/stalled-review-decisions.js";
 import { escalatedReviewHandoffService } from "../services/escalated-review-handoffs.js";
 import { environmentService } from "../services/environments.js";
@@ -3523,6 +3526,7 @@ export function issueRoutes(
   const svc = issueService(db);
   const runRedactions = createRunSecretRedactionRegistry(db);
   const access = accessService(db);
+  const authorizationSvc = authorizationService(db);
   const secretProposals = createSecretProposalsService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
@@ -12585,9 +12589,30 @@ export function issueRoutes(
         "Issue not found",
       );
       if (!issue) return;
-      assertBoard(req);
+      if (req.actor.type === "agent") {
+        if (!req.actor.agentId || !req.actor.runId) {
+          throw forbidden("An active authenticated agent run is required", {
+            code: "stalled_review_triage_active_run_required",
+          });
+        }
+        const authorization = await authorizationSvc.decidePrincipalGrant({
+          companyId: issue.companyId,
+          principalType: "agent",
+          principalId: req.actor.agentId,
+          action: "tasks:triage_stalled_review",
+          permissionKey: "tasks:triage_stalled_review",
+        });
+        if (!authorization.allowed) {
+          throw forbidden(authorization.explanation, {
+            code: "stalled_review_triage_permission_required",
+            permission: "tasks:triage_stalled_review",
+          });
+        }
+      } else {
+        assertBoard(req);
+      }
 
-      if (req.actor.source !== "local_implicit") {
+      if (req.actor.type === "board" && req.actor.source !== "local_implicit") {
         const userId = req.actor.userId?.trim();
         const membership = userId
           ? await db
@@ -12612,34 +12637,28 @@ export function issueRoutes(
       }
 
       const actor = getActorInfo(req);
-      const result = await stalledReviewDecisionService(db).decide({
+      const decisionSvc = stalledReviewDecisionService(db);
+      const result = await decisionSvc.decide({
         issueId: issue.id,
         companyId: issue.companyId,
         action: req.body.action,
         note: req.body.note,
-        actor: {
-          userId: actor.actorId,
-          runId: actor.runId,
-        },
+        assigneeAgentId: req.body.assigneeAgentId,
+        idempotencyKey: req.body.idempotencyKey,
+        actor: actor.actorType === "agent"
+          ? {
+              type: "agent",
+              agentId: actor.actorId,
+              runId: actor.runId!,
+            }
+          : {
+              type: "user",
+              userId: actor.actorId,
+              runId: actor.runId,
+            },
       });
 
-      // The decision transaction has already committed the status change. The
-      // remaining side effects (comment sync, resume wake) are best-effort: a
-      // transient failure must not fail the request, because the decision
-      // cannot be retried once the issue has left `in_review`, which would
-      // permanently strand the resume signal. This mirrors the issue-update
-      // wake dispatch, and the issue lands durably in `todo`/`done` regardless.
-      //
-      // Reviewed and accepted as best-effort rather than transactional (PAP-16101):
-      // `enqueueWakeup` writes a durable `agent_wakeup_requests` row, so the wake
-      // is scheduler-driven the moment that insert lands, and the catch below only
-      // covers a transient insert failure. In that narrow window the issue is in
-      // `todo` *still assigned* — an active status the normal liveness sweep picks
-      // up — so the worst case is a delayed resume, not the invisible
-      // `in_review`-with-zero-paths zombie this contract exists to kill. Making
-      // only this path transactional would also diverge from every other route's
-      // post-commit dispatch. `wakeQueued` is returned so callers can see the
-      // difference.
+      await externalObjectsSvc.syncIssueSafely(result.issue.id);
       if (result.comment) {
         try {
           await issueReferencesSvc.syncComment(result.comment.id);
@@ -12654,38 +12673,94 @@ export function issueRoutes(
 
       let wakeQueued = false;
       if (req.body.action !== "approve" && result.issue.assigneeAgentId) {
-        const userAuthoredNote = result.comment
-          ? { commentId: result.comment.id, authorUserId: actor.actorId }
-          : undefined;
         try {
-          const wake = await enqueueStalledReviewDecisionWakeup(
-            result.issue.assigneeAgentId,
-            {
-              source: "automation",
-              triggerDetail: "system",
-              reason: "issue_status_changed",
-              idempotencyKey: `stalled-review-decision:${result.issue.id}:${req.body.action}`,
-              requestedByActorType: "user",
-              requestedByActorId: actor.actorId,
-              payload: {
-                issueId: result.issue.id,
-                mutation: "stalled_review_decision",
-                reviewDecision: req.body.action,
-                resumeIntent: true,
-                ...(userAuthoredNote ? { userAuthoredNote } : {}),
+          if (actor.actorType === "agent" && result.decisionId) {
+            const wakeIdempotencyKey = `stalled-review-agent-handoff:${result.decisionId}`;
+            const agentAuthoredNote = result.comment
+              ? {
+                  commentId: result.comment.id,
+                  authorAgentId: actor.actorId,
+                  createdByRunId: actor.runId,
+                }
+              : undefined;
+            wakeQueued = await decisionSvc.ensureAgentWakeQueued({
+              companyId: result.issue.companyId,
+              decisionId: result.decisionId,
+              enqueue: async () => {
+                const existingWake = await db.select().from(agentWakeupRequests).where(and(
+                  eq(agentWakeupRequests.companyId, result.issue.companyId),
+                  eq(agentWakeupRequests.agentId, result.issue.assigneeAgentId!),
+                  eq(agentWakeupRequests.idempotencyKey, wakeIdempotencyKey),
+                  sql`${agentWakeupRequests.status} <> 'skipped'`,
+                )).limit(1).then((rows) => rows[0] ?? null);
+                if (existingWake) return existingWake;
+                return enqueueStalledReviewDecisionWakeup(
+                  result.issue.assigneeAgentId!,
+                  {
+                    source: "automation",
+                    triggerDetail: "system",
+                    reason: "issue_status_changed",
+                    idempotencyKey: wakeIdempotencyKey,
+                    requestedByActorType: "agent",
+                    requestedByActorId: actor.actorId,
+                    payload: {
+                      issueId: result.issue.id,
+                      mutation: "stalled_review_decision",
+                      reviewDecision: req.body.action,
+                      resumeIntent: true,
+                      ...(agentAuthoredNote ? { agentAuthoredNote } : {}),
+                    },
+                    contextSnapshot: {
+                      issueId: result.issue.id,
+                      taskId: result.issue.id,
+                      source: "issue.stalled_review_decision",
+                      wakeReason: "issue_status_changed",
+                      reviewDecision: req.body.action,
+                      resumeIntent: true,
+                      ...(agentAuthoredNote ? { agentAuthoredNote } : {}),
+                    },
+                    issueStateGuard: {
+                      statuses: ["todo"],
+                      assigneeAgentId: result.issue.assigneeAgentId!,
+                      statusVersion: result.issue.statusVersion,
+                    },
+                  },
+                );
               },
-              contextSnapshot: {
-                issueId: result.issue.id,
-                taskId: result.issue.id,
-                source: "issue.stalled_review_decision",
-                wakeReason: "issue_status_changed",
-                reviewDecision: req.body.action,
-                resumeIntent: true,
-                ...(userAuthoredNote ? { userAuthoredNote } : {}),
+            });
+          } else {
+            const userAuthoredNote = result.comment
+              ? { commentId: result.comment.id, authorUserId: actor.actorId }
+              : undefined;
+            const wake = await enqueueStalledReviewDecisionWakeup(
+              result.issue.assigneeAgentId,
+              {
+                source: "automation",
+                triggerDetail: "system",
+                reason: "issue_status_changed",
+                idempotencyKey: `stalled-review-decision:${result.issue.id}:${req.body.action}`,
+                requestedByActorType: "user",
+                requestedByActorId: actor.actorId,
+                payload: {
+                  issueId: result.issue.id,
+                  mutation: "stalled_review_decision",
+                  reviewDecision: req.body.action,
+                  resumeIntent: true,
+                  ...(userAuthoredNote ? { userAuthoredNote } : {}),
+                },
+                contextSnapshot: {
+                  issueId: result.issue.id,
+                  taskId: result.issue.id,
+                  source: "issue.stalled_review_decision",
+                  wakeReason: "issue_status_changed",
+                  reviewDecision: req.body.action,
+                  resumeIntent: true,
+                  ...(userAuthoredNote ? { userAuthoredNote } : {}),
+                },
               },
-            },
-          );
-          wakeQueued = wake !== null;
+            );
+            wakeQueued = wake !== null;
+          }
         } catch (err) {
           logger.warn(
             {

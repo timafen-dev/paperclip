@@ -14,13 +14,16 @@ import {
   heartbeatRuns,
   issueApprovals,
   issueComments,
+  issueExecutionDecisions,
   issueInboxArchives,
   issueRecoveryActions,
   issueThreadInteractions,
   issues,
+  principalPermissionGrants,
 } from "@paperclipai/db";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
+import { stalledReviewDecisionService } from "../services/stalled-review-decisions.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -51,12 +54,14 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
     await db.delete(issueApprovals);
     await db.delete(approvals);
     await db.delete(issueComments);
+    await db.delete(issueExecutionDecisions);
     await db.delete(issueRecoveryActions);
     await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(issueInboxArchives);
     await db.delete(issues);
+    await db.delete(principalPermissionGrants);
     await db.delete(companyMemberships);
     await db.delete(agents);
     await db.delete(companies);
@@ -70,6 +75,7 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
     const companyId = randomUUID();
     const assigneeAgentId = randomUUID();
     const peerAgentId = randomUUID();
+    const triageAgentId = randomUUID();
     const memberUserId = `${prefix.toLowerCase()}-member`;
     const peerUserId = `${prefix.toLowerCase()}-peer`;
     const viewerUserId = `${prefix.toLowerCase()}-viewer`;
@@ -102,8 +108,40 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
         runtimeConfig: {},
         permissions: {},
       },
+      {
+        id: triageAgentId,
+        companyId,
+        name: `${prefix} Triage`,
+        role: "engineer",
+        status: "idle",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
     ]);
     await db.insert(companyMemberships).values([
+      {
+        companyId,
+        principalType: "agent",
+        principalId: assigneeAgentId,
+        status: "active",
+        membershipRole: "operator",
+      },
+      {
+        companyId,
+        principalType: "agent",
+        principalId: peerAgentId,
+        status: "active",
+        membershipRole: "operator",
+      },
+      {
+        companyId,
+        principalType: "agent",
+        principalId: triageAgentId,
+        status: "active",
+        membershipRole: "operator",
+      },
       {
         companyId,
         principalType: "user",
@@ -126,7 +164,7 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
         membershipRole: "viewer",
       },
     ]);
-    return { companyId, assigneeAgentId, peerAgentId, memberUserId, peerUserId, viewerUserId };
+    return { companyId, assigneeAgentId, peerAgentId, triageAgentId, memberUserId, peerUserId, viewerUserId };
   }
 
   async function seedReview(input: {
@@ -161,14 +199,14 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
     return issueId;
   }
 
-  function app(actor: Record<string, unknown>) {
+  function app(actor: Record<string, unknown>, routeDb = db) {
     const testApp = express();
     testApp.use(express.json());
     testApp.use((req, _res, next) => {
       (req as any).actor = actor;
       next();
     });
-    testApp.use("/api", issueRoutes(db, {} as any, {
+    testApp.use("/api", issueRoutes(routeDb, {} as any, {
       stalledReviewDecisionEnqueueWakeup: enqueueWakeup as any,
     }));
     testApp.use(errorHandler);
@@ -210,6 +248,50 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
     return runId;
   }
 
+  async function grantStalledReviewTriage(companyId: string, agentId: string) {
+    await db.insert(principalPermissionGrants).values({
+      companyId,
+      principalType: "agent",
+      principalId: agentId,
+      permissionKey: "tasks:triage_stalled_review",
+    });
+  }
+
+  async function makeLocalBoardStalledReview(input: {
+    issueId: string;
+    previousAgentId: string;
+  }) {
+    const stageId = randomUUID();
+    await db.update(issues).set({
+      assigneeAgentId: null,
+      assigneeUserId: "local-board",
+      executionPolicy: {
+        mode: "normal",
+        commentRequired: true,
+        maxReviewRounds: 2,
+        stages: [{
+          id: stageId,
+          type: "review",
+          approvalsNeeded: 1,
+          participants: [{ id: randomUUID(), type: "agent", agentId: input.previousAgentId }],
+        }],
+      },
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "user", userId: "local-board" },
+        returnAssignee: { type: "agent", agentId: input.previousAgentId },
+        reviewRequest: null,
+        completedStageIds: [],
+        lastDecisionId: randomUUID(),
+        lastDecisionOutcome: "changes_requested",
+        changesRequestedCount: 2,
+      },
+    }).where(eq(issues.id, input.issueId));
+  }
+
   it("denies agents, viewers, and cross-company users without exposing issue existence", async () => {
     const primary = await seedCompany("SRD");
     const foreign = await seedCompany("FRN");
@@ -249,6 +331,353 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
       .send({ status: "done" });
     expect(selfApproval.status, JSON.stringify(selfApproval.body)).toBe(200);
     expect(selfApproval.body).toMatchObject({ id: issueId, status: "done" });
+  });
+
+  it("lets an explicitly granted active run hand a local-board stalled review to a new agent", async () => {
+    const seeded = await seedCompany("ATR");
+    const sourceIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.triageAgentId,
+      identifier: "ATR-1",
+      status: "in_progress",
+    });
+    const targetIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      identifier: "ATR-2",
+    });
+    await makeLocalBoardStalledReview({
+      issueId: targetIssueId,
+      previousAgentId: seeded.assigneeAgentId,
+    });
+    await grantStalledReviewTriage(seeded.companyId, seeded.triageAgentId);
+    const runId = await seedRun(seeded.companyId, seeded.triageAgentId, sourceIssueId);
+
+    const response = await request(app(agentActor(seeded.companyId, seeded.triageAgentId, runId)))
+      .post(`/api/issues/${targetIssueId}/stalled-review-decision`)
+      .send({
+        action: "request_changes",
+        note: "Third review round moves to the senior engineer.",
+        assigneeAgentId: seeded.peerAgentId,
+        idempotencyKey: "cmpa-54:atr-2:senior-engineer",
+      });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body).toMatchObject({
+      action: "request_changes",
+      wakeQueued: true,
+      issue: {
+        id: targetIssueId,
+        status: "todo",
+        assigneeAgentId: seeded.peerAgentId,
+        assigneeUserId: null,
+        executionState: null,
+      },
+      comment: {
+        issueId: targetIssueId,
+        authorAgentId: seeded.triageAgentId,
+        createdByRunId: runId,
+      },
+    });
+    expect(response.body.issue.assigneeAgentId).not.toBe(seeded.assigneeAgentId);
+
+    const [decision] = await db.select().from(issueExecutionDecisions)
+      .where(eq(issueExecutionDecisions.issueId, targetIssueId));
+    expect(decision).toMatchObject({
+      actorAgentId: seeded.triageAgentId,
+      actorUserId: null,
+      createdByRunId: runId,
+      outcome: "changes_requested",
+      targetAssigneeAgentId: seeded.peerAgentId,
+      idempotencyKey: "cmpa-54:atr-2:senior-engineer",
+    });
+
+    const wakeOptions = enqueueWakeup.mock.calls[0]?.[1];
+    expect(enqueueWakeup).toHaveBeenCalledTimes(1);
+    expect(enqueueWakeup.mock.calls[0]?.[0]).toBe(seeded.peerAgentId);
+    expect(wakeOptions).toMatchObject({
+      idempotencyKey: expect.stringMatching(/^stalled-review-agent-handoff:[0-9a-f-]+$/),
+      requestedByActorType: "agent",
+      requestedByActorId: seeded.triageAgentId,
+      payload: { issueId: targetIssueId, reviewDecision: "request_changes" },
+      contextSnapshot: { issueId: targetIssueId, reviewDecision: "request_changes" },
+      issueStateGuard: {
+        statuses: ["todo"],
+        assigneeAgentId: seeded.peerAgentId,
+        statusVersion: response.body.issue.statusVersion,
+      },
+    });
+
+    const activities = await db.select().from(activityLog)
+      .where(eq(activityLog.entityId, targetIssueId));
+    const decisionActivity = activities.find((row) => row.action === "issue.stalled_review_decided");
+    expect(decisionActivity).toMatchObject({
+      actorType: "agent",
+      actorId: seeded.triageAgentId,
+      agentId: seeded.triageAgentId,
+      runId,
+    });
+    expect(JSON.stringify(activities)).not.toContain('"actorType":"user"');
+  });
+
+  it("keeps agent triage default-deny and rejects invalid target or stalled state", async () => {
+    const seeded = await seedCompany("ADR");
+    const foreign = await seedCompany("AFX");
+    const sourceIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.triageAgentId,
+      identifier: "ADR-1",
+      status: "in_progress",
+    });
+    const runId = await seedRun(seeded.companyId, seeded.triageAgentId, sourceIssueId);
+    const actor = agentActor(seeded.companyId, seeded.triageAgentId, runId);
+    const payload = {
+      action: "request_changes",
+      note: "Move stalled review.",
+      assigneeAgentId: seeded.peerAgentId,
+      idempotencyKey: "cmpa-54:deny-matrix",
+    };
+
+    const ungrantedIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      identifier: "ADR-2",
+    });
+    await makeLocalBoardStalledReview({ issueId: ungrantedIssueId, previousAgentId: seeded.assigneeAgentId });
+    await request(app(actor)).post(`/api/issues/${ungrantedIssueId}/stalled-review-decision`)
+      .send(payload).expect(403);
+
+    await grantStalledReviewTriage(seeded.companyId, seeded.triageAgentId);
+    await request(app(agentActor(seeded.companyId, seeded.triageAgentId)))
+      .post(`/api/issues/${ungrantedIssueId}/stalled-review-decision`)
+      .send({ ...payload, idempotencyKey: "cmpa-54:inactive-run" })
+      .expect(403);
+    const foreignIssueId = await seedReview({
+      companyId: foreign.companyId,
+      assigneeAgentId: foreign.assigneeAgentId,
+      identifier: "AFX-1",
+    });
+    await makeLocalBoardStalledReview({ issueId: foreignIssueId, previousAgentId: foreign.assigneeAgentId });
+    await request(app(actor)).post(`/api/issues/${foreignIssueId}/stalled-review-decision`)
+      .send({ ...payload, idempotencyKey: "cmpa-54:foreign-issue" }).expect(404);
+
+    const notStalledIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      identifier: "ADR-3",
+      status: "todo",
+    });
+    await request(app(actor)).post(`/api/issues/${notStalledIssueId}/stalled-review-decision`)
+      .send({ ...payload, idempotencyKey: "cmpa-54:not-stalled" }).expect(409);
+
+    const wrongParticipantIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      identifier: "ADR-4",
+    });
+    await request(app(actor)).post(`/api/issues/${wrongParticipantIssueId}/stalled-review-decision`)
+      .send({ ...payload, idempotencyKey: "cmpa-54:not-local-board" }).expect(409);
+
+    const inactiveTargetIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      identifier: "ADR-5",
+    });
+    await makeLocalBoardStalledReview({ issueId: inactiveTargetIssueId, previousAgentId: seeded.assigneeAgentId });
+    await db.update(agents).set({ status: "terminated" }).where(eq(agents.id, seeded.peerAgentId));
+    await request(app(actor)).post(`/api/issues/${inactiveTargetIssueId}/stalled-review-decision`)
+      .send({ ...payload, idempotencyKey: "cmpa-54:inactive-target" }).expect(409);
+    await db.update(agents).set({ status: "idle" }).where(eq(agents.id, seeded.peerAgentId));
+
+    await request(app(actor)).post(`/api/issues/${inactiveTargetIssueId}/stalled-review-decision`)
+      .send({
+        ...payload,
+        assigneeAgentId: foreign.peerAgentId,
+        idempotencyKey: "cmpa-54:foreign-target",
+      }).expect(422);
+    await request(app(actor)).post(`/api/issues/${inactiveTargetIssueId}/stalled-review-decision`)
+      .send({
+        ...payload,
+        assigneeAgentId: seeded.assigneeAgentId,
+        idempotencyKey: "cmpa-54:old-executor",
+      }).expect(409);
+  });
+
+  it("replays identical agent handoffs, retries wakeup, and rejects idempotency-key reuse", async () => {
+    const seeded = await seedCompany("IDM");
+    const sourceIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.triageAgentId,
+      identifier: "IDM-1",
+      status: "in_progress",
+    });
+    const targetIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      identifier: "IDM-2",
+    });
+    await makeLocalBoardStalledReview({ issueId: targetIssueId, previousAgentId: seeded.assigneeAgentId });
+    await grantStalledReviewTriage(seeded.companyId, seeded.triageAgentId);
+    const runId = await seedRun(seeded.companyId, seeded.triageAgentId, sourceIssueId);
+    const actorApp = app(agentActor(seeded.companyId, seeded.triageAgentId, runId));
+    const payload = {
+      action: "request_changes",
+      note: "Stable handoff request.",
+      assigneeAgentId: seeded.peerAgentId,
+      idempotencyKey: "cmpa-54:idempotent",
+    };
+
+    enqueueWakeup.mockResolvedValueOnce(null);
+    const first = await request(actorApp).post(`/api/issues/${targetIssueId}/stalled-review-decision`)
+      .send(payload).expect(200);
+    const replay = await request(actorApp).post(`/api/issues/${targetIssueId}/stalled-review-decision`)
+      .send(payload).expect(200);
+    expect(first.body.wakeQueued).toBe(false);
+    expect(replay.body.wakeQueued).toBe(true);
+    expect(replay.body.comment.id).toBe(first.body.comment.id);
+    expect(replay.body.issue).toEqual(first.body.issue);
+    expect(enqueueWakeup).toHaveBeenCalledTimes(2);
+    expect(await db.select().from(issueExecutionDecisions)
+      .where(eq(issueExecutionDecisions.issueId, targetIssueId))).toHaveLength(1);
+    expect(await db.select().from(issueComments)
+      .where(eq(issueComments.issueId, targetIssueId))).toHaveLength(1);
+
+    await request(actorApp).post(`/api/issues/${targetIssueId}/stalled-review-decision`)
+      .send({ ...payload, note: "Different request with the same key." }).expect(409);
+  });
+
+  it("serializes concurrent identical agent handoffs", async () => {
+    const seeded = await seedCompany("CON");
+    const sourceIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.triageAgentId,
+      identifier: "CON-1",
+      status: "in_progress",
+    });
+    const targetIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      identifier: "CON-2",
+    });
+    await makeLocalBoardStalledReview({ issueId: targetIssueId, previousAgentId: seeded.assigneeAgentId });
+    await grantStalledReviewTriage(seeded.companyId, seeded.triageAgentId);
+    const runId = await seedRun(seeded.companyId, seeded.triageAgentId, sourceIssueId);
+    const actorApp = app(agentActor(seeded.companyId, seeded.triageAgentId, runId));
+    const payload = {
+      action: "request_changes",
+      note: "Concurrent stable handoff.",
+      assigneeAgentId: seeded.peerAgentId,
+      idempotencyKey: "cmpa-54:concurrent",
+    };
+
+    const responses = await Promise.all([
+      request(actorApp).post(`/api/issues/${targetIssueId}/stalled-review-decision`).send(payload),
+      request(actorApp).post(`/api/issues/${targetIssueId}/stalled-review-decision`).send(payload),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(responses[0]?.body.comment.id).toBe(responses[1]?.body.comment.id);
+    expect(enqueueWakeup).toHaveBeenCalledTimes(1);
+    expect(await db.select().from(issueExecutionDecisions)
+      .where(eq(issueExecutionDecisions.issueId, targetIssueId))).toHaveLength(1);
+  });
+
+  it("does not hold the decision transaction while enqueueing the agent wake", async () => {
+    const seeded = await seedCompany("DLK");
+    const sourceIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.triageAgentId,
+      identifier: "DLK-1",
+      status: "in_progress",
+    });
+    const targetIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      identifier: "DLK-2",
+    });
+    await makeLocalBoardStalledReview({ issueId: targetIssueId, previousAgentId: seeded.assigneeAgentId });
+    await grantStalledReviewTriage(seeded.companyId, seeded.triageAgentId);
+    const runId = await seedRun(seeded.companyId, seeded.triageAgentId, sourceIssueId);
+
+    const singleConnectionDb = createDb(tempDb!.connectionString, {
+      maxConnections: 1,
+      connectTimeoutSeconds: 2,
+    });
+    try {
+      const decisionSvc = stalledReviewDecisionService(singleConnectionDb);
+      const decisionResult = await decisionSvc.decide({
+        issueId: targetIssueId,
+        companyId: seeded.companyId,
+        action: "request_changes",
+        note: "Wake outside the receipt transaction.",
+        assigneeAgentId: seeded.peerAgentId,
+        idempotencyKey: "cmpa-54:single-connection",
+        actor: {
+          type: "agent",
+          agentId: seeded.triageAgentId,
+          runId,
+        },
+      });
+      expect(decisionResult.decisionId).toBeTruthy();
+
+      const wakeQueued = await decisionSvc.ensureAgentWakeQueued({
+        companyId: seeded.companyId,
+        decisionId: decisionResult.decisionId!,
+        enqueue: async () => {
+          const [decision] = await singleConnectionDb.select({
+            wakeClaimToken: issueExecutionDecisions.wakeClaimToken,
+          }).from(issueExecutionDecisions).where(eq(issueExecutionDecisions.issueId, targetIssueId));
+          expect(decision?.wakeClaimToken).toBeTruthy();
+          return { id: randomUUID() };
+        },
+      });
+
+      expect(wakeQueued).toBe(true);
+      const [decision] = await singleConnectionDb.select().from(issueExecutionDecisions)
+        .where(eq(issueExecutionDecisions.issueId, targetIssueId));
+      expect(decision).toMatchObject({
+        wakeClaimToken: null,
+        wakeClaimedAt: null,
+        wakeQueuedAt: expect.any(Date),
+      });
+    } finally {
+      await singleConnectionDb.$client.end({ timeout: 1 });
+    }
+  });
+
+  it("guards a post-commit agent wake with the committed assignment revision", async () => {
+    const seeded = await seedCompany("GRD");
+    const sourceIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.triageAgentId,
+      identifier: "GRD-1",
+      status: "in_progress",
+    });
+    const targetIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      identifier: "GRD-2",
+    });
+    await makeLocalBoardStalledReview({ issueId: targetIssueId, previousAgentId: seeded.assigneeAgentId });
+    await grantStalledReviewTriage(seeded.companyId, seeded.triageAgentId);
+    const runId = await seedRun(seeded.companyId, seeded.triageAgentId, sourceIssueId);
+
+    const response = await request(app(agentActor(seeded.companyId, seeded.triageAgentId, runId)))
+      .post(`/api/issues/${targetIssueId}/stalled-review-decision`)
+      .send({
+        action: "request_changes",
+        note: "Guard the committed assignment.",
+        assigneeAgentId: seeded.peerAgentId,
+        idempotencyKey: "cmpa-54:guarded-wake",
+      });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(enqueueWakeup).toHaveBeenCalledWith(seeded.peerAgentId, expect.objectContaining({
+      issueStateGuard: {
+        statuses: ["todo"],
+        assigneeAgentId: seeded.peerAgentId,
+        statusVersion: response.body.issue.statusVersion,
+      },
+    }));
   });
 
   it("still lets the pending execution-policy stage participant sign off as done", async () => {

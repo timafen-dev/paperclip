@@ -227,6 +227,27 @@ function loadSpecRoutes() {
 }
 
 describe("openapi routes", () => {
+  it("documents the explicit run-bound grant for agent stalled-review triage", () => {
+    const spec = buildOpenApiSpec() as any;
+    const operation = spec.paths["/api/issues/{id}/stalled-review-decision"].post;
+    expect(operation.security).toEqual([
+      { BoardSessionAuth: [] },
+      { BoardApiKeyAuth: [] },
+      { AgentBearerAuth: [] },
+    ]);
+    expect(operation["x-paperclip-authorization"]).toEqual({
+      actor: "board_or_agent",
+      agent: {
+        heartbeatBound: true,
+        permission: "tasks:triage_stalled_review",
+      },
+    });
+    const body = operation.requestBody.content["application/json"].schema;
+    expect(body.properties).toHaveProperty("assigneeAgentId");
+    expect(body.properties).toHaveProperty("idempotencyKey");
+    expect(operation.description).toContain("local-board");
+  });
+
   it("documents personal board-only announcements and private responses", () => {
     const { spec } = loadSpecRoutes();
     const current = spec.paths["/api/announcements/current"].get;
