@@ -228,7 +228,7 @@ export function escalatedReviewHandoffService(db: Db) {
           state.currentParticipant?.type === "user" &&
           state.currentParticipant.userId === lockedIssue.assigneeUserId &&
           state.lastDecisionOutcome === "changes_requested" &&
-          state.changesRequestedCount >= maxReviewRounds;
+          (state.changesRequestedCount ?? 0) >= maxReviewRounds;
         if (!isExhaustedEscalatedReview || !state || !stage) {
           throw conflict("Issue is not an exhausted escalated review", {
             code: "issue_not_exhausted_escalated_review",
