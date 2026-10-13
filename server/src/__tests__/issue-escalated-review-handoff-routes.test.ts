@@ -308,6 +308,9 @@ describeEmbeddedPostgres("escalated review handoff routes", () => {
       .where(eq(heartbeatRuns.id, seeded.runId));
     const second = await request(app(actor))
       .post(`/api/issues/${seeded.targetIssueId}/escalated-review-handoff`).send(body);
+    const conflicting = await request(app(actor))
+      .post(`/api/issues/${seeded.targetIssueId}/escalated-review-handoff`)
+      .send({ ...body, comment: "Different request." });
 
     expect(first.status, JSON.stringify(first.body)).toBe(200);
     expect(second.status, JSON.stringify(second.body)).toBe(200);
@@ -317,6 +320,10 @@ describeEmbeddedPostgres("escalated review handoff routes", () => {
       wakeup: { id: first.body.wakeup.id },
       comment: { id: first.body.comment.id },
       decision: { id: first.body.decision.id },
+    });
+    expect(conflicting.status, JSON.stringify(conflicting.body)).toBe(409);
+    expect(conflicting.body.details).toMatchObject({
+      code: "escalated_review_handoff_idempotency_conflict",
     });
 
     const [comments, decisions, wakeups, audits] = await Promise.all([
@@ -332,5 +339,47 @@ describeEmbeddedPostgres("escalated review handoff routes", () => {
     expect(decisions).toHaveLength(1);
     expect(wakeups).toHaveLength(1);
     expect(audits).toHaveLength(1);
+  });
+
+  it("replays the twentieth cross-issue handoff without spending a twenty-first allowance", async () => {
+    const seeded = await seed();
+    await db.insert(activityLog).values(
+      Array.from({ length: 19 }, () => ({
+        companyId: seeded.companyId,
+        actorType: "agent",
+        actorId: seeded.routineAgentId,
+        agentId: seeded.routineAgentId,
+        runId: seeded.runId,
+        action: "issue.cross_issue_influence_observed",
+        entityType: "issue",
+        entityId: seeded.targetIssueId,
+        details: { kind: "update" },
+      })),
+    );
+    const body = {
+      assigneeAgentId: seeded.seniorAgentId,
+      comment: "Boundary replay.",
+      idempotencyKey: randomUUID(),
+    };
+    const actor = agentActor(seeded.companyId, seeded.routineAgentId, seeded.runId);
+
+    const first = await request(app(actor))
+      .post(`/api/issues/${seeded.targetIssueId}/escalated-review-handoff`).send(body);
+    const second = await request(app(actor))
+      .post(`/api/issues/${seeded.targetIssueId}/escalated-review-handoff`).send(body);
+
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+    expect(second.body).toMatchObject({
+      replayed: true,
+      wakeup: { id: first.body.wakeup.id },
+      comment: { id: first.body.comment.id },
+      decision: { id: first.body.decision.id },
+    });
+    const influenceRows = await db.select().from(activityLog).where(and(
+      eq(activityLog.runId, seeded.runId),
+      eq(activityLog.action, "issue.cross_issue_influence_observed"),
+    ));
+    expect(influenceRows).toHaveLength(20);
   });
 });

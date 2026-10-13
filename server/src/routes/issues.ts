@@ -3772,6 +3772,7 @@ export function issueRoutes(
     res: Response,
     issue: { id: string; identifier?: string | null; companyId: string },
     kind: CrossIssueInfluenceKind,
+    idempotencyKey?: string,
   ) {
     if (req.actor.type !== "agent") return true;
     if (!req.actor.agentId || !req.actor.runId)
@@ -3787,6 +3788,7 @@ export function issueRoutes(
       targetIssueId: issue.id,
       targetIssueIdentifier: issue.identifier ?? null,
       kind,
+      idempotencyKey,
     });
     if (!decision || decision.allowed) return true;
 
@@ -12734,6 +12736,7 @@ export function issueRoutes(
           res,
           issue,
           "update",
+          req.body.idempotencyKey,
         ))
       )
         return;
