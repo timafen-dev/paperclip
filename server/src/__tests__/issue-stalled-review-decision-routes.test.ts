@@ -251,6 +251,111 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
     expect(selfApproval.body).toMatchObject({ id: issueId, status: "done" });
   });
 
+  it("lets an authenticated agent run approve a stalled review with agent attribution", async () => {
+    const seeded = await seedCompany("SRA");
+    const sourceIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.peerAgentId,
+      identifier: "SRA-1",
+      status: "in_progress",
+    });
+    const targetIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      identifier: "SRA-2",
+    });
+    const runId = await seedRun(seeded.companyId, seeded.peerAgentId, sourceIssueId);
+    await request(app(agentActor(seeded.companyId, seeded.peerAgentId, runId)))
+      .post(`/api/issues/${targetIssueId}/stalled-review-decision`)
+      .send({ action: "request_changes", note: "Agents must not take this path." })
+      .expect(403);
+
+    const response = await request(app(agentActor(seeded.companyId, seeded.peerAgentId, runId)))
+      .post(`/api/issues/${targetIssueId}/stalled-review-decision`)
+      .send({ action: "approve", note: "Verified by the review routine." });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body).toMatchObject({
+      action: "approve",
+      wakeQueued: false,
+      issue: { id: targetIssueId, status: "done" },
+      comment: {
+        issueId: targetIssueId,
+        authorAgentId: seeded.peerAgentId,
+        authorUserId: null,
+      },
+    });
+    const [decisionActivity] = await db.select().from(activityLog)
+      .where(eq(activityLog.action, "issue.stalled_review_decided"));
+    expect(decisionActivity).toMatchObject({
+      actorType: "agent",
+      actorId: seeded.peerAgentId,
+      agentId: seeded.peerAgentId,
+      runId,
+      details: {
+        action: "approve",
+        status: "done",
+      },
+    });
+  });
+
+  it("lets an authenticated agent run approve an exhausted escalated review", async () => {
+    const seeded = await seedCompany("ERA");
+    const sourceIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.peerAgentId,
+      identifier: "ERA-1",
+      status: "in_progress",
+    });
+    const targetIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      identifier: "ERA-2",
+    });
+    const stageId = randomUUID();
+    await db.update(issues).set({
+      assigneeAgentId: null,
+      assigneeUserId: seeded.memberUserId,
+      executionPolicy: {
+        mode: "normal",
+        commentRequired: true,
+        maxReviewRounds: 3,
+        stages: [{
+          id: stageId,
+          type: "review",
+          approvalsNeeded: 1,
+          participants: [{ id: randomUUID(), type: "agent", agentId: seeded.assigneeAgentId }],
+        }],
+      },
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "user", userId: seeded.memberUserId },
+        returnAssignee: { type: "agent", agentId: seeded.assigneeAgentId },
+        reviewRequest: null,
+        completedStageIds: [],
+        lastDecisionId: randomUUID(),
+        lastDecisionOutcome: "changes_requested",
+        monitor: null,
+        changesRequestedCount: 3,
+      },
+    }).where(eq(issues.id, targetIssueId));
+    const runId = await seedRun(seeded.companyId, seeded.peerAgentId, sourceIssueId);
+
+    const response = await request(app(agentActor(seeded.companyId, seeded.peerAgentId, runId)))
+      .post(`/api/issues/${targetIssueId}/stalled-review-decision`)
+      .send({ action: "approve" });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body).toMatchObject({
+      action: "approve",
+      wakeQueued: false,
+      issue: { id: targetIssueId, status: "done" },
+    });
+  });
+
   it("still lets the pending execution-policy stage participant sign off as done", async () => {
     // Execution-policy signoff reassigns the issue to each stage's participant, so
     // the reviewer/approver *is* the assignee. Their `done` PATCH is a stage advance

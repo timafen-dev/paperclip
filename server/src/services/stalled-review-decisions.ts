@@ -13,9 +13,15 @@ import {
   issueService,
   type IssuePostCommitAction,
 } from "./issues.js";
+import {
+  DEFAULT_MAX_REVIEW_ROUNDS,
+  normalizeIssueExecutionPolicy,
+  parseIssueExecutionState,
+} from "./issue-execution-policy.js";
 
 export interface StalledReviewDecisionActor {
-  userId: string;
+  actorType: "agent" | "user";
+  actorId: string;
   runId?: string | null;
 }
 
@@ -57,19 +63,46 @@ export function stalledReviewDecisionService(db: Db) {
         const reviewAttention = await svc
           .listReviewAttention(lockedIssue.companyId, [lockedIssue], tx)
           .then((rows) => rows.get(lockedIssue.id));
-        if (reviewAttention?.state !== "stalled") {
+        const policy = normalizeIssueExecutionPolicy(lockedIssue.executionPolicy);
+        const state = parseIssueExecutionState(lockedIssue.executionState);
+        const maxReviewRounds =
+          typeof policy?.maxReviewRounds === "number" && policy.maxReviewRounds > 0
+            ? policy.maxReviewRounds
+            : DEFAULT_MAX_REVIEW_ROUNDS;
+        const stage = policy?.stages.find(
+          (candidate) => candidate.id === state?.currentStageId,
+        );
+        const isExhaustedEscalatedReview =
+          lockedIssue.assigneeAgentId === null &&
+          lockedIssue.assigneeUserId != null &&
+          state?.status === "pending" &&
+          state.currentStageType === "review" &&
+          stage?.type === "review" &&
+          state.currentParticipant?.type === "user" &&
+          state.currentParticipant.userId === lockedIssue.assigneeUserId &&
+          state.lastDecisionOutcome === "changes_requested" &&
+          (state.changesRequestedCount ?? 0) >= maxReviewRounds;
+        if (
+          reviewAttention?.state !== "stalled" &&
+          !isExhaustedEscalatedReview
+        ) {
           throw conflict("Issue is no longer a stalled review", {
             issueId: lockedIssue.id,
             reviewAttentionState: reviewAttention?.state ?? "none",
           });
         }
 
+        const actorRunId = input.actor.runId ?? null;
+        const actorIsAgent = input.actor.actorType === "agent";
+        const commentActor = actorIsAgent
+          ? { agentId: input.actor.actorId, runId: actorRunId }
+          : { userId: input.actor.actorId, runId: actorRunId };
         const comment = input.note
           ? await svc.addComment(
               lockedIssue.id,
               input.note,
-              { userId: input.actor.userId, runId: input.actor.runId ?? null },
-              { authorType: "user" },
+              commentActor,
+              { authorType: input.actor.actorType },
               tx,
             )
           : null;
@@ -78,7 +111,9 @@ export function stalledReviewDecisionService(db: Db) {
           lockedIssue.id,
           {
             status,
-            actorUserId: input.actor.userId,
+            actorAgentId: actorIsAgent ? input.actor.actorId : null,
+            actorRunId: actorIsAgent ? actorRunId : null,
+            actorUserId: actorIsAgent ? null : input.actor.actorId,
           },
           tx,
           postCommitActivityPublications,
@@ -89,25 +124,29 @@ export function stalledReviewDecisionService(db: Db) {
         if (comment) {
           await logActivity(txDb, {
             companyId: updated.companyId,
-            actorType: "user",
-            actorId: input.actor.userId,
-            runId: input.actor.runId ?? null,
+            actorType: input.actor.actorType,
+            actorId: input.actor.actorId,
+            agentId: actorIsAgent ? input.actor.actorId : null,
+            runId: actorRunId,
             action: "issue.comment_added",
             entityType: "issue",
             entityId: updated.id,
             issueId: updated.id,
             details: {
               commentId: comment.id,
-              authorUserId: input.actor.userId,
+              ...(actorIsAgent
+                ? { authorAgentId: input.actor.actorId }
+                : { authorUserId: input.actor.actorId }),
               source: "stalled_review_decision",
             },
           });
         }
         await logActivity(txDb, {
           companyId: updated.companyId,
-          actorType: "user",
-          actorId: input.actor.userId,
-          runId: input.actor.runId ?? null,
+          actorType: input.actor.actorType,
+          actorId: input.actor.actorId,
+          agentId: actorIsAgent ? input.actor.actorId : null,
+          runId: actorRunId,
           action: "issue.stalled_review_decided",
           entityType: "issue",
           entityId: updated.id,
@@ -117,7 +156,8 @@ export function stalledReviewDecisionService(db: Db) {
             status,
             identifier: updated.identifier,
             commentId: comment?.id ?? null,
-            authorUserId: comment ? input.actor.userId : null,
+            authorAgentId: comment && actorIsAgent ? input.actor.actorId : null,
+            authorUserId: comment && !actorIsAgent ? input.actor.actorId : null,
             _previous: { status: lockedIssue.status },
           },
         });
