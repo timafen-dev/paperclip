@@ -251,7 +251,7 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
     expect(selfApproval.body).toMatchObject({ id: issueId, status: "done" });
   });
 
-  it("lets an authenticated agent run approve a stalled review with agent attribution", async () => {
+  it("rejects an authenticated agent run approving an ordinary stalled review", async () => {
     const seeded = await seedCompany("SRA");
     const sourceIssueId = await seedReview({
       companyId: seeded.companyId,
@@ -274,29 +274,18 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
       .post(`/api/issues/${targetIssueId}/stalled-review-decision`)
       .send({ action: "approve", note: "Verified by the review routine." });
 
-    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.status, JSON.stringify(response.body)).toBe(409);
     expect(response.body).toMatchObject({
-      action: "approve",
-      wakeQueued: false,
-      issue: { id: targetIssueId, status: "done" },
-      comment: {
-        issueId: targetIssueId,
-        authorAgentId: seeded.peerAgentId,
-        authorUserId: null,
-      },
+      error: "Issue is no longer a stalled review",
     });
-    const [decisionActivity] = await db.select().from(activityLog)
-      .where(eq(activityLog.action, "issue.stalled_review_decided"));
-    expect(decisionActivity).toMatchObject({
-      actorType: "agent",
-      actorId: seeded.peerAgentId,
-      agentId: seeded.peerAgentId,
-      runId,
-      details: {
-        action: "approve",
-        status: "done",
-      },
-    });
+    const [persisted] = await db.select({ status: issues.status }).from(issues)
+      .where(eq(issues.id, targetIssueId));
+    expect(persisted?.status).toBe("in_review");
+    expect(await db.select().from(issueComments)).toHaveLength(0);
+    expect(
+      await db.select().from(activityLog)
+        .where(eq(activityLog.action, "issue.stalled_review_decided")),
+    ).toHaveLength(0);
   });
 
   it("lets an authenticated agent run approve an exhausted escalated review", async () => {

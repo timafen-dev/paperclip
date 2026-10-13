@@ -82,10 +82,10 @@ export function stalledReviewDecisionService(db: Db) {
           state.currentParticipant.userId === lockedIssue.assigneeUserId &&
           state.lastDecisionOutcome === "changes_requested" &&
           (state.changesRequestedCount ?? 0) >= maxReviewRounds;
-        if (
-          reviewAttention?.state !== "stalled" &&
-          !isExhaustedEscalatedReview
-        ) {
+        const canDecideStalledReview = input.actor.actorType === "agent"
+          ? isExhaustedEscalatedReview
+          : reviewAttention?.state === "stalled" || isExhaustedEscalatedReview;
+        if (!canDecideStalledReview) {
           throw conflict("Issue is no longer a stalled review", {
             issueId: lockedIssue.id,
             reviewAttentionState: reviewAttention?.state ?? "none",
