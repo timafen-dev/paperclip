@@ -11635,6 +11635,7 @@ export function issueService(db: Db) {
             eq(heartbeatRuns.id, checkoutRunId),
             eq(heartbeatRuns.companyId, issueCompany.companyId),
             eq(heartbeatRuns.agentId, agentId),
+            inArray(heartbeatRuns.status, ["queued", "running"]),
             sql`coalesce(
               nullif(btrim(${heartbeatRuns.contextSnapshot}->>'issueId'), ''),
               nullif(btrim(${heartbeatRuns.contextSnapshot}->>'taskId'), '')

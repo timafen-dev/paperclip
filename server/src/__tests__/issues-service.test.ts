@@ -6068,6 +6068,56 @@ describeEmbeddedPostgres("issueService.clearExecutionRunIfTerminal", () => {
     })).resolves.toMatchObject({ allowed: true, count: 2 });
   });
 
+  it("does not bind a terminal run to its checked-out issue", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      status: "succeeded",
+      invocationSource: "timer",
+      contextSnapshot: { source: "timer" },
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Routine execution",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+
+    await svc.checkout(issueId, agentId, ["todo"], runId);
+
+    const run = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0]);
+    expect(run?.contextSnapshot).toEqual({ source: "timer" });
+  });
+
   it.each(["issueId", "taskId"] as const)(
     "preserves an existing run %s source during checkout",
     async (sourceKey) => {

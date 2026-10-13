@@ -91,6 +91,7 @@ export async function observeCrossIssueInfluence(
         companyId: heartbeatRuns.companyId,
         agentId: heartbeatRuns.agentId,
         responsibleUserId: heartbeatRuns.responsibleUserId,
+        status: heartbeatRuns.status,
         contextSnapshot: heartbeatRuns.contextSnapshot,
       })
       .from(heartbeatRuns)
@@ -104,7 +105,8 @@ export async function observeCrossIssueInfluence(
     if (
       !run ||
       run.companyId !== input.companyId ||
-      run.agentId !== input.agentId
+      run.agentId !== input.agentId ||
+      !["queued", "running"].includes(run.status)
     ) {
       throw crossIssueInfluenceRunContextError();
     }
