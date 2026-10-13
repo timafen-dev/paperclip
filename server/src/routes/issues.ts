@@ -12587,29 +12587,50 @@ export function issueRoutes(
         "Issue not found",
       );
       if (!issue) return;
-      assertBoard(req);
-
-      if (req.actor.source !== "local_implicit") {
-        const userId = req.actor.userId?.trim();
-        const membership = userId
-          ? await db
-              .select({ membershipRole: companyMemberships.membershipRole })
-              .from(companyMemberships)
-              .where(
-                and(
-                  eq(companyMemberships.companyId, issue.companyId),
-                  eq(companyMemberships.principalType, "user"),
-                  eq(companyMemberships.principalId, userId),
-                  eq(companyMemberships.status, "active"),
-                ),
-              )
-              .then((rows) => rows[0] ?? null)
-          : null;
+      if (req.actor.type === "agent") {
         if (
-          !membership?.membershipRole ||
-          membership.membershipRole === "viewer"
+          req.body.action !== "approve" ||
+          !req.actor.agentId ||
+          !req.actor.runId
         ) {
-          throw forbidden("Active non-viewer company membership required");
+          throw forbidden(
+            "An authenticated agent run can only approve a stalled review",
+          );
+        }
+        if (
+          !(await assertCrossIssueInfluenceWithinRunCap(
+            req,
+            res,
+            issue,
+            "update",
+            `stalled-review-decision:${issue.id}:approve`,
+          ))
+        ) return;
+      } else {
+        assertBoard(req);
+
+        if (req.actor.source !== "local_implicit") {
+          const userId = req.actor.userId?.trim();
+          const membership = userId
+            ? await db
+                .select({ membershipRole: companyMemberships.membershipRole })
+                .from(companyMemberships)
+                .where(
+                  and(
+                    eq(companyMemberships.companyId, issue.companyId),
+                    eq(companyMemberships.principalType, "user"),
+                    eq(companyMemberships.principalId, userId),
+                    eq(companyMemberships.status, "active"),
+                  ),
+                )
+                .then((rows) => rows[0] ?? null)
+            : null;
+          if (
+            !membership?.membershipRole ||
+            membership.membershipRole === "viewer"
+          ) {
+            throw forbidden("Active non-viewer company membership required");
+          }
         }
       }
 
@@ -12620,7 +12641,8 @@ export function issueRoutes(
         action: req.body.action,
         note: req.body.note,
         actor: {
-          userId: actor.actorId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
           runId: actor.runId,
         },
       });
