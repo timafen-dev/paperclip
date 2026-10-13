@@ -23,6 +23,19 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 
+const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
+
+vi.mock("../services/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/index.js")>();
+  return {
+    ...actual,
+    heartbeatService: (...args: Parameters<typeof actual.heartbeatService>) => ({
+      ...actual.heartbeatService(...args),
+      wakeup: mockWakeup,
+    }),
+  };
+});
+
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported
   ? describe
@@ -48,6 +61,7 @@ describeEmbeddedPostgres("escalated review handoff routes", () => {
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(companies);
+    mockWakeup.mockClear();
   });
 
   afterAll(async () => tempDb?.cleanup());
@@ -328,18 +342,23 @@ describeEmbeddedPostgres("escalated review handoff routes", () => {
       eq(agentWakeupRequests.agentId, seeded.seniorAgentId),
       eq(agentWakeupRequests.status, "queued"),
     ))).toHaveLength(0);
+    expect(mockWakeup).not.toHaveBeenCalled();
 
     const blockerDone = await request(app(actor))
       .patch(`/api/issues/${blockerIssueId}`)
       .send({ status: "done" });
     expect(blockerDone.status, JSON.stringify(blockerDone.body)).toBe(200);
-    await vi.waitFor(async () => {
-      expect(await db.select().from(agentWakeupRequests).where(and(
-        eq(agentWakeupRequests.agentId, seeded.seniorAgentId),
-        eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
-      ))).toEqual([
-        expect.objectContaining({ status: "queued" }),
-      ]);
+    await vi.waitFor(() => {
+      expect(mockWakeup).toHaveBeenCalledWith(
+        seeded.seniorAgentId,
+        expect.objectContaining({
+          reason: "issue_blockers_resolved",
+          payload: expect.objectContaining({
+            issueId: seeded.targetIssueId,
+            resolvedBlockerIssueId: blockerIssueId,
+          }),
+        }),
+      );
     });
   });
 
