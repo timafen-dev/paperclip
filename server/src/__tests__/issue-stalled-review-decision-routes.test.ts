@@ -23,6 +23,7 @@ import {
 } from "@paperclipai/db";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
+import { stalledReviewDecisionService } from "../services/stalled-review-decisions.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -198,14 +199,14 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
     return issueId;
   }
 
-  function app(actor: Record<string, unknown>) {
+  function app(actor: Record<string, unknown>, routeDb = db) {
     const testApp = express();
     testApp.use(express.json());
     testApp.use((req, _res, next) => {
       (req as any).actor = actor;
       next();
     });
-    testApp.use("/api", issueRoutes(db, {} as any, {
+    testApp.use("/api", issueRoutes(routeDb, {} as any, {
       stalledReviewDecisionEnqueueWakeup: enqueueWakeup as any,
     }));
     testApp.use(errorHandler);
@@ -400,6 +401,11 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
       requestedByActorId: seeded.triageAgentId,
       payload: { issueId: targetIssueId, reviewDecision: "request_changes" },
       contextSnapshot: { issueId: targetIssueId, reviewDecision: "request_changes" },
+      issueStateGuard: {
+        statuses: ["todo"],
+        assigneeAgentId: seeded.peerAgentId,
+        statusVersion: response.body.issue.statusVersion,
+      },
     });
 
     const activities = await db.select().from(activityLog)
@@ -573,6 +579,105 @@ describeEmbeddedPostgres("stalled review decision routes", () => {
     expect(enqueueWakeup).toHaveBeenCalledTimes(1);
     expect(await db.select().from(issueExecutionDecisions)
       .where(eq(issueExecutionDecisions.issueId, targetIssueId))).toHaveLength(1);
+  });
+
+  it("does not hold the decision transaction while enqueueing the agent wake", async () => {
+    const seeded = await seedCompany("DLK");
+    const sourceIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.triageAgentId,
+      identifier: "DLK-1",
+      status: "in_progress",
+    });
+    const targetIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      identifier: "DLK-2",
+    });
+    await makeLocalBoardStalledReview({ issueId: targetIssueId, previousAgentId: seeded.assigneeAgentId });
+    await grantStalledReviewTriage(seeded.companyId, seeded.triageAgentId);
+    const runId = await seedRun(seeded.companyId, seeded.triageAgentId, sourceIssueId);
+
+    const singleConnectionDb = createDb(tempDb!.connectionString, {
+      maxConnections: 1,
+      connectTimeoutSeconds: 2,
+    });
+    try {
+      const decisionSvc = stalledReviewDecisionService(singleConnectionDb);
+      const decisionResult = await decisionSvc.decide({
+        issueId: targetIssueId,
+        companyId: seeded.companyId,
+        action: "request_changes",
+        note: "Wake outside the receipt transaction.",
+        assigneeAgentId: seeded.peerAgentId,
+        idempotencyKey: "cmpa-54:single-connection",
+        actor: {
+          type: "agent",
+          agentId: seeded.triageAgentId,
+          runId,
+        },
+      });
+      expect(decisionResult.decisionId).toBeTruthy();
+
+      const wakeQueued = await decisionSvc.ensureAgentWakeQueued({
+        companyId: seeded.companyId,
+        decisionId: decisionResult.decisionId!,
+        enqueue: async () => {
+          const [decision] = await singleConnectionDb.select({
+            wakeClaimToken: issueExecutionDecisions.wakeClaimToken,
+          }).from(issueExecutionDecisions).where(eq(issueExecutionDecisions.issueId, targetIssueId));
+          expect(decision?.wakeClaimToken).toBeTruthy();
+          return { id: randomUUID() };
+        },
+      });
+
+      expect(wakeQueued).toBe(true);
+      const [decision] = await singleConnectionDb.select().from(issueExecutionDecisions)
+        .where(eq(issueExecutionDecisions.issueId, targetIssueId));
+      expect(decision).toMatchObject({
+        wakeClaimToken: null,
+        wakeClaimedAt: null,
+        wakeQueuedAt: expect.any(Date),
+      });
+    } finally {
+      await singleConnectionDb.$client.end({ timeout: 1 });
+    }
+  });
+
+  it("guards a post-commit agent wake with the committed assignment revision", async () => {
+    const seeded = await seedCompany("GRD");
+    const sourceIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.triageAgentId,
+      identifier: "GRD-1",
+      status: "in_progress",
+    });
+    const targetIssueId = await seedReview({
+      companyId: seeded.companyId,
+      assigneeAgentId: seeded.assigneeAgentId,
+      identifier: "GRD-2",
+    });
+    await makeLocalBoardStalledReview({ issueId: targetIssueId, previousAgentId: seeded.assigneeAgentId });
+    await grantStalledReviewTriage(seeded.companyId, seeded.triageAgentId);
+    const runId = await seedRun(seeded.companyId, seeded.triageAgentId, sourceIssueId);
+
+    const response = await request(app(agentActor(seeded.companyId, seeded.triageAgentId, runId)))
+      .post(`/api/issues/${targetIssueId}/stalled-review-decision`)
+      .send({
+        action: "request_changes",
+        note: "Guard the committed assignment.",
+        assigneeAgentId: seeded.peerAgentId,
+        idempotencyKey: "cmpa-54:guarded-wake",
+      });
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(enqueueWakeup).toHaveBeenCalledWith(seeded.peerAgentId, expect.objectContaining({
+      issueStateGuard: {
+        statuses: ["todo"],
+        assigneeAgentId: seeded.peerAgentId,
+        statusVersion: response.body.issue.statusVersion,
+      },
+    }));
   });
 
   it("still lets the pending execution-policy stage participant sign off as done", async () => {

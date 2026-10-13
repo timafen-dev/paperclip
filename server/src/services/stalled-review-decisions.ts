@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import {
   heartbeatRuns,
@@ -43,14 +43,16 @@ type StoredAgentDecisionResponse = {
   comment: { id: string };
 };
 
-function agentDecisionRequestHash(input: DecideStalledReviewInput) {
+const AGENT_WAKE_CLAIM_LEASE_MS = 5 * 60_000;
+
+function agentDecisionRequestFingerprint(input: DecideStalledReviewInput) {
   if (input.actor.type !== "agent") throw new Error("Agent decision actor required");
-  return createHash("sha256").update(JSON.stringify({
+  return JSON.stringify({
     action: input.action,
     note: input.note ?? null,
     assigneeAgentId: input.assigneeAgentId ?? null,
     actorAgentId: input.actor.agentId,
-  })).digest("hex");
+  });
 }
 
 function storedAgentResponse(value: unknown): StoredAgentDecisionResponse | null {
@@ -83,7 +85,7 @@ export function stalledReviewDecisionService(db: Db) {
       throw unprocessable("Agent stalled-review triage requires a note");
     }
 
-    const requestHash = agentDecisionRequestHash(input);
+    const requestHash = agentDecisionRequestFingerprint(input);
     const postCommitActivityPublications: ActivityPublication[] = [];
     const result = await db.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
@@ -421,28 +423,68 @@ export function stalledReviewDecisionService(db: Db) {
       companyId: string;
       decisionId: string;
       enqueue: () => Promise<unknown | null>;
-    }) => db.transaction(async (tx) => {
-      const decision = await tx
-        .select({ wakeQueuedAt: issueExecutionDecisions.wakeQueuedAt })
-        .from(issueExecutionDecisions)
-        .where(and(
+    }) => {
+      const claimToken = randomUUID();
+      const claimCutoff = new Date(Date.now() - AGENT_WAKE_CLAIM_LEASE_MS);
+      const claim = await db.transaction(async (tx) => {
+        const decision = await tx
+          .select({
+            wakeQueuedAt: issueExecutionDecisions.wakeQueuedAt,
+            wakeClaimToken: issueExecutionDecisions.wakeClaimToken,
+            wakeClaimedAt: issueExecutionDecisions.wakeClaimedAt,
+          })
+          .from(issueExecutionDecisions)
+          .where(and(
+            eq(issueExecutionDecisions.id, input.decisionId),
+            eq(issueExecutionDecisions.companyId, input.companyId),
+          ))
+          .for("update")
+          .then((rows) => rows[0] ?? null);
+        if (!decision) throw notFound("Stalled-review decision receipt not found");
+        if (decision.wakeQueuedAt) return "queued" as const;
+        if (
+          decision.wakeClaimToken &&
+          decision.wakeClaimedAt &&
+          decision.wakeClaimedAt > claimCutoff
+        ) return "claimed" as const;
+        await tx.update(issueExecutionDecisions).set({
+          wakeClaimToken: claimToken,
+          wakeClaimedAt: new Date(),
+          updatedAt: new Date(),
+        }).where(and(
           eq(issueExecutionDecisions.id, input.decisionId),
           eq(issueExecutionDecisions.companyId, input.companyId),
-        ))
-        .for("update")
-        .then((rows) => rows[0] ?? null);
-      if (!decision) throw notFound("Stalled-review decision receipt not found");
-      if (decision.wakeQueuedAt) return true;
-      const wake = await input.enqueue();
-      if (wake === null) return false;
-      await tx.update(issueExecutionDecisions).set({
-        wakeQueuedAt: new Date(),
-        updatedAt: new Date(),
-      }).where(and(
-        eq(issueExecutionDecisions.id, input.decisionId),
-        eq(issueExecutionDecisions.companyId, input.companyId),
-      ));
-      return true;
-    }),
+        ));
+        return "acquired" as const;
+      });
+      if (claim === "queued") return true;
+      if (claim === "claimed") return false;
+
+      try {
+        const wake = await input.enqueue();
+        await db.update(issueExecutionDecisions).set({
+          wakeClaimToken: null,
+          wakeClaimedAt: null,
+          ...(wake === null ? {} : { wakeQueuedAt: new Date() }),
+          updatedAt: new Date(),
+        }).where(and(
+          eq(issueExecutionDecisions.id, input.decisionId),
+          eq(issueExecutionDecisions.companyId, input.companyId),
+          eq(issueExecutionDecisions.wakeClaimToken, claimToken),
+        ));
+        return wake !== null;
+      } catch (error) {
+        await db.update(issueExecutionDecisions).set({
+          wakeClaimToken: null,
+          wakeClaimedAt: null,
+          updatedAt: new Date(),
+        }).where(and(
+          eq(issueExecutionDecisions.id, input.decisionId),
+          eq(issueExecutionDecisions.companyId, input.companyId),
+          eq(issueExecutionDecisions.wakeClaimToken, claimToken),
+        ));
+        throw error;
+      }
+    },
   };
 }

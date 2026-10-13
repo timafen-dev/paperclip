@@ -20,6 +20,8 @@ describe("issue execution decision schema", () => {
       "target_assignee_agent_id",
       "request_hash",
       "response_json",
+      "wake_claim_token",
+      "wake_claimed_at",
       "wake_queued_at",
     ]));
   });

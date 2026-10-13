@@ -12719,6 +12719,11 @@ export function issueRoutes(
                       resumeIntent: true,
                       ...(agentAuthoredNote ? { agentAuthoredNote } : {}),
                     },
+                    issueStateGuard: {
+                      statuses: ["todo"],
+                      assigneeAgentId: result.issue.assigneeAgentId!,
+                      statusVersion: result.issue.statusVersion,
+                    },
                   },
                 );
               },

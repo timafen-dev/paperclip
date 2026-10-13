@@ -22,6 +22,8 @@ export const issueExecutionDecisions = pgTable(
     idempotencyKey: text("idempotency_key"),
     requestHash: text("request_hash"),
     responseJson: jsonb("response_json").$type<Record<string, unknown>>(),
+    wakeClaimToken: uuid("wake_claim_token"),
+    wakeClaimedAt: timestamp("wake_claimed_at", { withTimezone: true }),
     wakeQueuedAt: timestamp("wake_queued_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
