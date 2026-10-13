@@ -56,6 +56,11 @@ export {
   type DecideStalledReviewInput,
   type StalledReviewDecisionActor,
 } from "./stalled-review-decisions.js";
+export {
+  escalatedReviewHandoffService,
+  type EscalatedReviewHandoffActor,
+  type EscalatedReviewHandoffInput,
+} from "./escalated-review-handoffs.js";
 export { taskWatchdogService } from "./task-watchdogs.js";
 export {
   issueIsInTaskWatchdogSubtree,

@@ -52,6 +52,7 @@ import {
   setIssueTitleSchema,
   updateIssueSchema,
   stalledReviewDecisionSchema,
+  escalatedReviewHandoffSchema,
   createIssueLabelSchema,
   addIssueCommentSchema,
   checkoutIssueSchema,
@@ -3973,6 +3974,53 @@ registry.registerPath({
     403: r.forbidden,
     404: r.notFound,
     409: r.conflict,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/escalated-review-handoff",
+  tags: ["issues"],
+  summary: "Hand an exhausted escalated review to another agent",
+  description:
+    "Available only to the authenticated run of an assigned routine-execution issue. Atomically records a changes-requested decision and agent-authored comment, clears the user assignment, assigns the requested agent, writes an audit entry, and queues one issue_assigned wakeup. The idempotency key is scoped to the target issue; an exact retry returns replayed=true and the original receipt.",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(escalatedReviewHandoffSchema),
+  },
+  responses: {
+    200: r.ok(
+      z.object({
+        issue: z.record(z.string(), z.unknown()),
+        decision: z.object({
+          id: z.string().guid(),
+          issueId: z.string().guid(),
+          actorAgentId: z.string().guid(),
+          actorUserId: z.null(),
+          outcome: z.literal("changes_requested"),
+        }).passthrough(),
+        comment: z.object({
+          id: z.string().guid(),
+          issueId: z.string().guid(),
+          authorAgentId: z.string().guid(),
+          authorUserId: z.null(),
+          body: z.string(),
+        }).passthrough(),
+        wakeup: z.object({
+          id: z.string().guid(),
+          agentId: z.string().guid(),
+          status: z.string(),
+          payload: z.object({ issueId: z.string().guid() }).passthrough(),
+        }).passthrough(),
+        replayed: z.boolean(),
+      }),
+    ),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
   },
 });
 

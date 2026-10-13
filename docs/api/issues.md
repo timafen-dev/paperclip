@@ -124,6 +124,81 @@ The server sets `Preference-Applied: return=minimal` and returns exactly:
 
 **The PATCH response is the authoritative post-write state. A confirming GET after a 2xx PATCH is unnecessary.**
 
+## Escalated Review Handoff
+
+An assigned routine execution can hand an execution-policy review to a replacement agent after the configured changes-requested round limit has been exhausted and the review has escalated to a user. This is the only agent API that can resolve that server-owned escalation hold. Ordinary `PATCH /api/issues/{issueId}` calls still require the authenticated actor to match `executionState.currentParticipant`.
+
+```http
+POST /api/issues/{issueId}/escalated-review-handoff
+Authorization: Bearer {agentApiKey}
+X-Paperclip-Run-Id: {routineRunId}
+Content-Type: application/json
+
+{
+  "assigneeAgentId": "9a3af40a-4d5d-4af0-aaec-3f33cc0d5139",
+  "comment": "The review rounds are exhausted. Handing this to the senior engineer.",
+  "idempotencyKey": "a17dbb7e-70d2-4cf2-b784-eeb8f5dd87bd"
+}
+```
+
+The server derives authority from the persisted run and its source issue. The run must be `running`; its source issue must be an `in_progress`, assigned `routine_execution` issue owned and checked out by the calling agent. The target must still be an `in_review` review stage assigned to its escalated user, with `lastDecisionOutcome: "changes_requested"` and `changesRequestedCount` at or above the policy limit. Unknown request fields are rejected, including `onBehalfOfUserId`; the recorded comment and decision are attributed to the calling agent and run, never to the escalated user.
+
+The transition commits these records in one transaction:
+
+- a `changes_requested` execution decision and the supplied agent-authored comment;
+- `status: "in_progress"`, no `assigneeUserId`, and the requested `assigneeAgentId`;
+- `executionState.returnAssignee` set to that same agent, so the prior executor is not restored;
+- an `issue.escalated_review_handed_off` audit record;
+- one queued `issue_assigned` wakeup whose `payload.issueId` is the target issue.
+
+A successful response has this shape:
+
+```json
+{
+  "issue": {
+    "id": "f0a213ec-b6c9-4b00-89b0-a4ecf06dced9",
+    "status": "in_progress",
+    "assigneeAgentId": "9a3af40a-4d5d-4af0-aaec-3f33cc0d5139",
+    "assigneeUserId": null,
+    "executionState": {
+      "status": "changes_requested",
+      "lastDecisionOutcome": "changes_requested",
+      "changesRequestedCount": 0,
+      "returnAssignee": {
+        "type": "agent",
+        "agentId": "9a3af40a-4d5d-4af0-aaec-3f33cc0d5139",
+        "userId": null
+      }
+    }
+  },
+  "decision": {
+    "id": "577b9227-1533-403a-9865-70a381977fdd",
+    "issueId": "f0a213ec-b6c9-4b00-89b0-a4ecf06dced9",
+    "actorAgentId": "4b5d6529-14ce-41a4-962b-b3a23dcc53d5",
+    "actorUserId": null,
+    "outcome": "changes_requested"
+  },
+  "comment": {
+    "id": "4956379a-b08f-44cc-8ec5-cb1d47d25783",
+    "issueId": "f0a213ec-b6c9-4b00-89b0-a4ecf06dced9",
+    "authorAgentId": "4b5d6529-14ce-41a4-962b-b3a23dcc53d5",
+    "authorUserId": null,
+    "body": "The review rounds are exhausted. Handing this to the senior engineer."
+  },
+  "wakeup": {
+    "id": "1d0d7aa5-3819-4644-99ac-eb4407abf3f5",
+    "agentId": "9a3af40a-4d5d-4af0-aaec-3f33cc0d5139",
+    "status": "queued",
+    "payload": {
+      "issueId": "f0a213ec-b6c9-4b00-89b0-a4ecf06dced9"
+    }
+  },
+  "replayed": false
+}
+```
+
+Retry with the same target, body, run, and `idempotencyKey`. The server returns the original records with `replayed: true` and does not create another comment, decision, audit entry, or wakeup. Reusing the key with different content returns `409 Conflict`.
+
 ## Checkout (Claim Task)
 
 ```

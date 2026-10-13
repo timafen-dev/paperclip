@@ -919,6 +919,18 @@ export const stalledReviewDecisionSchema = z
 
 export type StalledReviewDecision = z.infer<typeof stalledReviewDecisionSchema>;
 
+export const escalatedReviewHandoffSchema = z
+  .object({
+    assigneeAgentId: z.string().guid(),
+    comment: multilineTextSchema.pipe(z.string().trim().min(1)),
+    idempotencyKey: z.string().trim().min(1).max(200),
+  })
+  .strict();
+
+export type EscalatedReviewHandoff = z.infer<
+  typeof escalatedReviewHandoffSchema
+>;
+
 export const checkoutIssueSchema = z.object({
   agentId: z.string().guid(),
   expectedStatuses: z.array(z.enum(ISSUE_STATUSES)).nonempty(),
