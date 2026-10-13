@@ -36,6 +36,11 @@ const mockSecretService = vi.hoisted(() => ({
   syncEnvBindingsForTarget: vi.fn(),
 }));
 
+const mockIsFixedClaudeOAuthBinding = vi.hoisted(() => (binding: unknown) => {
+  const record = binding as Record<string, unknown> | null;
+  return record?.type === "user_secret_ref" && record.key === "CLAUDE_CODE_OAUTH_TOKEN";
+});
+
 const mockAgentInstructionsService = vi.hoisted(() => ({
   materializeManagedBundle: vi.fn(),
   getBundle: vi.fn(),
@@ -103,6 +108,7 @@ vi.mock("../services/instance-settings.js", () => ({
 
 vi.mock("../services/secrets.js", () => ({
   secretService: () => mockSecretService,
+  isFixedClaudeOAuthBinding: mockIsFixedClaudeOAuthBinding,
 }));
 
 vi.mock("../services/managed-agent-profiles.js", () => ({
@@ -137,6 +143,7 @@ function registerModuleMocks() {
 
   vi.doMock("../services/secrets.js", () => ({
     secretService: () => mockSecretService,
+    isFixedClaudeOAuthBinding: mockIsFixedClaudeOAuthBinding,
   }));
 
   vi.doMock("../services/managed-agent-profiles.js", () => ({

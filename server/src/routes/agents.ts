@@ -2477,7 +2477,7 @@ export function agentRoutes(
     constraintAdapterConfig?: Record<string, unknown>;
     submittedEnvKeys?: ReadonlySet<string>;
   }): Promise<Record<string, unknown>> {
-    const normalizedAdapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
+    let normalizedAdapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
       input.companyId,
       input.adapterConfig,
       {
@@ -2486,6 +2486,19 @@ export function agentRoutes(
         adapterType: input.adapterType ?? null,
       },
     );
+    const normalizedEnv = asRecord(normalizedAdapterConfig.env);
+    if (
+      input.adapterType !== "claude_local"
+      && input.submittedEnvKeys
+      && !input.submittedEnvKeys.has("CLAUDE_CODE_OAUTH_TOKEN")
+      && normalizedEnv
+      && normalizedEnv.CLAUDE_CODE_OAUTH_TOKEN !== undefined
+      && isFixedClaudeOAuthBinding(normalizedEnv.CLAUDE_CODE_OAUTH_TOKEN)
+    ) {
+      const nextEnv = { ...normalizedEnv };
+      delete nextEnv.CLAUDE_CODE_OAUTH_TOKEN;
+      normalizedAdapterConfig = { ...normalizedAdapterConfig, env: nextEnv };
+    }
     await assertAdapterConfigConstraints(
       input.companyId,
       input.adapterType,
