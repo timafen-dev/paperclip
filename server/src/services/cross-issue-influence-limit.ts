@@ -1,4 +1,4 @@
-import { and, count, eq } from "drizzle-orm";
+import { and, count, eq, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, heartbeatRuns, issues } from "@paperclipai/db";
 import { isUuidLike, issueWriteDenialResponse } from "@paperclipai/shared";
@@ -26,6 +26,25 @@ export type CrossIssueInfluenceDecision = {
   cap: number;
   enforceAt: string;
 };
+
+function persistedInfluenceDecision(details: unknown): CrossIssueInfluenceDecision | null {
+  if (!details || typeof details !== "object" || Array.isArray(details)) return null;
+  const value = details as Record<string, unknown>;
+  if (
+    typeof value.allowed !== "boolean" ||
+    (value.mode !== "log_only" && value.mode !== "enforce") ||
+    typeof value.count !== "number" ||
+    typeof value.cap !== "number" ||
+    typeof value.enforceAt !== "string"
+  ) return null;
+  return {
+    allowed: value.allowed,
+    mode: value.mode,
+    count: value.count,
+    cap: value.cap,
+    enforceAt: value.enforceAt,
+  };
+}
 
 export function crossIssueInfluenceRunContextError() {
   // Copy comes from the shared issue-write denial contract (the open cross-task write design (failure UX))
@@ -77,6 +96,7 @@ export async function observeCrossIssueInfluence(
     targetIssueId: string;
     targetIssueIdentifier?: string | null;
     kind: CrossIssueInfluenceKind;
+    idempotencyKey?: string;
     now?: Date;
   },
 ): Promise<CrossIssueInfluenceDecision | null> {
@@ -138,6 +158,26 @@ export async function observeCrossIssueInfluence(
       return null;
     }
 
+    if (input.idempotencyKey) {
+      const existing = await tx
+        .select({ details: activityLog.details })
+        .from(activityLog)
+        .where(and(
+          eq(activityLog.companyId, input.companyId),
+          eq(activityLog.runId, input.runId),
+          or(
+            eq(activityLog.action, CROSS_ISSUE_INFLUENCE_ACTIVITY),
+            eq(activityLog.action, CROSS_ISSUE_INFLUENCE_REJECTED_ACTIVITY),
+          ),
+          sql`${activityLog.details} ->> 'idempotencyKey' = ${input.idempotencyKey}`,
+          sql`${activityLog.details} ->> 'targetIssueId' = ${input.targetIssueId}`,
+          sql`${activityLog.details} ->> 'kind' = ${input.kind}`,
+        ))
+        .then((rows) => rows[0] ?? null);
+      const existingDecision = persistedInfluenceDecision(existing?.details);
+      if (existingDecision) return existingDecision;
+    }
+
     const priorCount = await tx
       .select({ count: count() })
       .from(activityLog)
@@ -171,6 +211,7 @@ export async function observeCrossIssueInfluence(
         mode: decision.mode,
         enforceAt: decision.enforceAt,
         allowed: decision.allowed,
+        idempotencyKey: input.idempotencyKey ?? null,
       },
     });
 
