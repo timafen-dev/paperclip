@@ -164,7 +164,7 @@ export function escalatedReviewHandoffService(db: Db) {
           if (
             receipt?.issueId !== input.issueId ||
             receipt.assigneeAgentId !== input.assigneeAgentId ||
-            receipt.sourceRoutineIssueId !== sourceIssue.id ||
+            receipt.sourceRoutineIssueId !== sourceIssueId ||
             receipt.sourceRunId !== input.actor.runId ||
             receipt.requestHash !== expectedRequestHash
           ) {
