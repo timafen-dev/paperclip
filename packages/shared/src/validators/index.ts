@@ -431,6 +431,7 @@ export {
   issueBlockedInboxStateSchema,
   updateIssueSchema,
   stalledReviewDecisionSchema,
+  escalatedReviewHandoffSchema,
   issueExecutionPolicySchema,
   issueExecutionStateSchema,
   issueRecoveryActionReadModelSchema,

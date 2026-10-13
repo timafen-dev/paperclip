@@ -102,6 +102,7 @@ import {
   restoreIssueDocumentRevisionSchema,
   respondIssueThreadInteractionSchema,
   stalledReviewDecisionSchema,
+  escalatedReviewHandoffSchema,
   submitIssueThreadInteractionVerdictsSchema,
   updateIssueWorkProductSchema,
   updateDocumentAnnotationThreadSchema,
@@ -287,6 +288,7 @@ import {
 } from "../services/issues.js";
 import { authorizationDeniedDetails } from "../services/authorization.js";
 import { stalledReviewDecisionService } from "../services/stalled-review-decisions.js";
+import { escalatedReviewHandoffService } from "../services/escalated-review-handoffs.js";
 import { environmentService } from "../services/environments.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
 import { redactSensitiveText } from "../redaction.js";
@@ -12702,6 +12704,64 @@ export function issueRoutes(
         comment: result.comment,
         wakeQueued,
       });
+    },
+  );
+
+  router.post(
+    "/issues/:id/escalated-review-handoff",
+    validate(escalatedReviewHandoffSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const issue = await getAccessibleResource(
+        req,
+        res,
+        svc.getById(id),
+        "Issue not found",
+      );
+      if (!issue) return;
+      if (
+        req.actor.type !== "agent" ||
+        !req.actor.agentId ||
+        !req.actor.runId
+      ) {
+        throw forbidden(
+          "An authenticated agent run is required for an escalated review handoff",
+        );
+      }
+      if (
+        !(await assertCrossIssueInfluenceWithinRunCap(
+          req,
+          res,
+          issue,
+          "update",
+        ))
+      )
+        return;
+
+      const result = await escalatedReviewHandoffService(db).handoff({
+        issueId: issue.id,
+        companyId: issue.companyId,
+        assigneeAgentId: req.body.assigneeAgentId,
+        comment: req.body.comment,
+        idempotencyKey: req.body.idempotencyKey,
+        actor: {
+          agentId: req.actor.agentId,
+          runId: req.actor.runId,
+        },
+      });
+
+      if (!result.replayed) {
+        try {
+          await issueReferencesSvc.syncComment(result.comment.id);
+          await externalObjectsSvc.syncCommentSafely(result.comment.id);
+        } catch (err) {
+          logger.warn(
+            { err, issueId: result.issue.id, commentId: result.comment.id },
+            "failed to sync escalated-review handoff comment",
+          );
+        }
+      }
+      res.json(result);
     },
   );
 
