@@ -28,6 +28,7 @@ import {
   routines,
   routineTriggers,
   routineWebhookTestReceipts,
+  withDedicatedDbConnection,
 } from "@paperclipai/db";
 import type {
   CreateRoutine,
@@ -1796,7 +1797,9 @@ export function routineService(
       description,
     });
     let reusedExistingRun = false;
-    const run = await db.transaction(async (tx) => {
+    // Lock waiters must not exhaust the shared pool used by issue creation and
+    // assignment wakeups while the dispatch transaction holds the routine lock.
+    const run = await withDedicatedDbConnection(db, (dispatchDb) => dispatchDb.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
       await tx.execute(
         sql`select id from ${routines} where ${routines.id} = ${input.routine.id} and ${routines.companyId} = ${input.routine.companyId} for update`,
@@ -2022,7 +2025,7 @@ export function routineService(
         }, txDb);
         return failed ?? createdRun;
       }
-    });
+    }));
 
     if (!reusedExistingRun && (input.source === "schedule" || input.source === "webhook")) {
       const actorId = input.source === "schedule" ? "routine-scheduler" : "routine-webhook";
