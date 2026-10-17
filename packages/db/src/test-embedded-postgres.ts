@@ -30,6 +30,7 @@ type EmbeddedPostgresCtor = new (opts: {
   port: number;
   persistent: boolean;
   initdbFlags?: string[];
+  postgresFlags?: string[];
   onLog?: (message: unknown) => void;
   onError?: (message: unknown) => void;
 }) => EmbeddedPostgresInstance;
@@ -129,6 +130,8 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
     port,
     persistent: true,
     initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
+    // Fixtures connect over loopback TCP, without shared host socket paths.
+    postgresFlags: ["-c", "unix_socket_directories="],
     onLog: (message) => logBuffer.append(message),
     onError: (message) => logBuffer.append(message),
   });
