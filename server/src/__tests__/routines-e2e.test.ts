@@ -135,11 +135,17 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
   });
 
   afterAll(async () => {
+    await db?.$client.end({ timeout: 1 });
     await tempDb?.cleanup();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules();
+    // A reset also replaces the DB module's dedicated-connection factory map.
+    // Construct the fixture client from the same module as the fresh routes.
+    await db.$client.end({ timeout: 1 });
+    const { createDb: createFreshDb } = await import("@paperclipai/db");
+    db = createFreshDb(tempDb!.connectionString);
     vi.doUnmock("@paperclipai/shared/telemetry");
     vi.doUnmock("../telemetry.js");
     vi.doUnmock("../services/access.js");
@@ -158,6 +164,8 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
     registerRoutineServiceMock();
     vi.doMock("../routes/authz.js", async () => vi.importActual("../routes/authz.js"));
     vi.clearAllMocks();
+    // Loading the fresh app is fixture setup, not part of each HTTP assertion's budget.
+    await Promise.all([import("../routes/routines.js"), import("../middleware/index.js")]);
   });
 
   async function createApp(actor: Record<string, unknown>) {

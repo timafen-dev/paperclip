@@ -1568,6 +1568,17 @@ proves provider termination and applies pause, budget, approval, dependency,
 and ownership gates. Saved input uses the existing ordered, single-delivery queue;
 prior completed actions and uncertain outcomes remain history. An operator Stop
 or ambiguous historical cancellation does not automatically release that queue.
+An existing recorded operator reconciliation owns one continuation for its exact
+company, task, return owner and stopped run. Under the task admission lock it can
+supersede older resolved no-replay bookkeeping for that same run and cause, after
+rechecking provider/coordinator/environment termination and normal admission
+gates. Other, newer, active, workspace-repair or ambiguous holds remain binding.
+The old outcome and evidence are retained and linked to the decision. Hold
+supersession, successor creation and delivery consumption commit together.
+User input arriving while that decision is pending stays in the native saved-input
+queue and ordinary task comments can join that same successor. Replaying its
+delivery adopts the recorded successor, including after it has finished; it does
+not authorize a second execution or replay of previously performed actions.
 Externally bound chat conversations use a new chat message to continue. Their
 recovery notices show that guidance and do not offer the board Continue action.
 Removed chat connections direct the operator to inspect the run and create a new

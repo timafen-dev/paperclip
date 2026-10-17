@@ -22,6 +22,104 @@ import {
 } from "@paperclipai/shared";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
+import { executionBlockerPredicate } from "./execution-blocker.js";
+import { adapterExecutionControls } from "./adapter-execution-control.js";
+import { approvals, issueApprovals, issueThreadInteractions } from "@paperclipai/db";
+
+type RecoveryAction = typeof issueRecoveryActions.$inferSelect;
+
+/** The saved operator decision, not a competing user wake, owns this delivery.
+ * The caller holds the company-scoped issue lock. Ambiguous decisions stay held.
+ */
+export async function pendingExecutionReconciliations(
+  db: Db, companyId: string, issueId: string, agentId: string,
+) {
+  return db.select().from(issueRecoveryActions).where(and(
+    eq(issueRecoveryActions.companyId, companyId),
+    eq(issueRecoveryActions.sourceIssueId, issueId),
+    eq(issueRecoveryActions.returnOwnerAgentId, agentId),
+    eq(issueRecoveryActions.kind, "active_run_watchdog"),
+    eq(issueRecoveryActions.status, "resolved"),
+    sql`${issueRecoveryActions.evidence}->>'continuationDelivery' = 'pending'`,
+    sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'providerStopped' = 'true'`,
+  )).for("update");
+}
+
+/** Qualify only older bookkeeping covered by this exact stopped-run decision.
+ * No hold is changed until the normal admission gates have also passed.
+ */
+export async function prepareReconciledExecution(
+  db: Db, action: RecoveryAction, agentId: string,
+): Promise<{ action: RecoveryAction; covered: RecoveryAction[] } | null> {
+  const pending = await pendingExecutionReconciliations(db, action.companyId, action.sourceIssueId, agentId);
+  if (pending.length !== 1 || pending[0]!.id !== action.id) return null;
+  const decision = action.evidence.executionReconciliation as ExecutionReconciliation & {
+    actorId?: string; recordedAt?: string;
+  };
+  if (adapterExecutionControls.has(decision.runId)) return null;
+  // Match native continuation lock order. A terminal row alone is not proof
+  // that the coordinator, process or environment has released its authority.
+  await db.select().from(nativeRunFinalizations).where(and(
+    eq(nativeRunFinalizations.companyId, action.companyId),
+    eq(nativeRunFinalizations.runId, decision.runId),
+  )).for("update");
+  await db.select().from(heartbeatRuns).where(and(
+    eq(heartbeatRuns.companyId, action.companyId), eq(heartbeatRuns.id, decision.runId),
+  )).for("update");
+  await validateExecutionReconciliation({ db, companyId: action.companyId,
+    issueId: action.sourceIssueId, agentId, sourceRunId: action.evidence.runId, decision });
+  const [interaction] = await db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
+    eq(issueThreadInteractions.companyId, action.companyId),
+    eq(issueThreadInteractions.issueId, action.sourceIssueId), eq(issueThreadInteractions.status, "pending"),
+  )).limit(1);
+  const [approval] = await db.select({ id: approvals.id }).from(issueApprovals).innerJoin(approvals, and(
+    eq(approvals.companyId, action.companyId), eq(approvals.id, issueApprovals.approvalId),
+  )).where(and(eq(issueApprovals.companyId, action.companyId),
+    eq(issueApprovals.issueId, action.sourceIssueId), inArray(approvals.status, ["pending", "revision_requested"]),
+  )).limit(1);
+  if (interaction || approval || await getConversationOwnershipBlocker(db, action.companyId, action.sourceIssueId)) return null;
+  const covered = await db.select().from(issueRecoveryActions).where(and(
+    eq(issueRecoveryActions.companyId, action.companyId),
+    eq(issueRecoveryActions.sourceIssueId, action.sourceIssueId), executionBlockerPredicate(),
+  )).for("update");
+  const recordedAt = Date.parse(decision.recordedAt ?? "");
+  for (const older of covered) {
+    if (older.id === action.id || older.kind !== action.kind || older.ownerType !== "board" ||
+        older.returnOwnerAgentId !== agentId || older.cause !== action.cause ||
+        older.status !== "resolved" || older.outcome !== "blocked" ||
+        (older.evidence.runId ?? older.evidence.sourceRunId) !== decision.runId ||
+        !decision.actorId?.trim() || !Number.isFinite(recordedAt) ||
+        older.createdAt.getTime() > recordedAt || older.updatedAt.getTime() > recordedAt ||
+        older.evidence.executionReconciliation || older.evidence.explicitUserContinuation ||
+        older.evidence.continuationDelivery || older.evidence.workspaceRestoreFailure) return null;
+  }
+  return { action, covered };
+}
+
+/** Same transaction as successor creation. Preserve the old outcome/evidence;
+ * only its effective no-replay bookkeeping is superseded by the saved decision.
+ */
+export async function retireReconciledExecutionHolds(
+  db: Db, admission: NonNullable<Awaited<ReturnType<typeof prepareReconciledExecution>>>,
+) {
+  for (const older of admission.covered) {
+    await db.update(issueRecoveryActions).set({
+      evidence: { ...older.evidence,
+        reconciliationSupersession: { recoveryActionId: admission.action.id,
+          decision: admission.action.evidence.executionReconciliation,
+          previousAutomaticRecovery: older.evidence.automaticRecovery },
+        automaticRecovery: { ...(older.evidence.automaticRecovery as Record<string, unknown>), replay: "reconciled" },
+      }, updatedAt: new Date(),
+    }).where(and(eq(issueRecoveryActions.companyId, older.companyId),
+      eq(issueRecoveryActions.sourceIssueId, older.sourceIssueId), eq(issueRecoveryActions.id, older.id)));
+  }
+  if (admission.covered.length) await persistActivity(db, {
+    companyId: admission.action.companyId, actorType: "system", actorId: "execution-recovery",
+    action: "issue.execution_recovery_settled", entityType: "issue", entityId: admission.action.sourceIssueId,
+    details: { continuation: "operator_reconciliation", recoveryActionId: admission.action.id,
+      coveredRecoveryActionIds: admission.covered.map(action => action.id) },
+  });
+}
 
 /** An operator records observed outcomes; this is not permission to blindly retry. */
 export async function validateExecutionReconciliation(input: {

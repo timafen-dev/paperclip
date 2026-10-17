@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -97,6 +97,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
 
   async function seedFixture(opts?: {
     runtimeEnv?: Record<string, string | undefined>;
+    beforeWakeup?: () => Promise<void>;
     wakeup?: (
       agentId: string,
       wakeupOpts: {
@@ -160,6 +161,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       heartbeat: {
         wakeup: async (wakeupAgentId, wakeupOpts) => {
           wakeups.push({ agentId: wakeupAgentId, opts: wakeupOpts });
+          await opts?.beforeWakeup?.();
           if (opts?.wakeup) return opts.wakeup(wakeupAgentId, wakeupOpts);
           const issueId =
             (typeof wakeupOpts.payload?.issueId === "string" && wakeupOpts.payload.issueId) ||
@@ -2093,6 +2095,95 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       ),
     ).rejects.toThrow(/valid YYYY-MM-DD date/i);
   });
+
+  it.each(["coalesce_if_active", "skip_if_active"] as const)(
+    "keeps the default pool available during a dispatch burst (%s)",
+    async (concurrencyPolicy) => {
+      const originalDb = db;
+      // Startup settings bound both shared and dedicated fixture connections,
+      // including the unfixed path, without terminating a backend or a worker.
+      const testUrl = new URL(tempDb!.connectionString);
+      testUrl.searchParams.set("lock_timeout", "1500ms");
+      testUrl.searchParams.set("statement_timeout", "5s");
+      db = createDb(testUrl.toString(), { connectTimeoutSeconds: 2 });
+      expect(db.$client.options.max).toBe(10);
+      const observer = createDb(tempDb!.connectionString, { maxConnections: 1 });
+      let sampledPeakConnections = 0;
+      let releaseWake!: () => void;
+      let enteredWake!: () => void;
+      const wakeGate = new Promise<void>((resolve) => { releaseWake = resolve; });
+      const wakeEntered = new Promise<void>((resolve) => { enteredWake = resolve; });
+      type DispatchRun = Awaited<ReturnType<ReturnType<typeof routineService>["runRoutine"]>>;
+      const pending: Promise<DispatchRun>[] = [];
+      let ordinaryRead: Promise<boolean> | undefined;
+      let readTimer: ReturnType<typeof setTimeout> | undefined;
+      let wakeTimer: ReturnType<typeof setTimeout> | undefined;
+      let readWhileLocked = false;
+      let results: PromiseSettledResult<DispatchRun>[] = [];
+      try {
+        const { routine, svc, wakeups } = await seedFixture({
+          beforeWakeup: async () => { enteredWake(); await wakeGate; },
+        });
+        await db.update(routines).set({ concurrencyPolicy }).where(eq(routines.id, routine.id));
+        pending.push(svc.runRoutine(routine.id, { source: "api", idempotencyKey: "burst-0" }));
+        await Promise.race([
+          wakeEntered,
+          pending[0].then(() => { throw new Error("Dispatch returned before queueing the expected wakeup"); }),
+          new Promise<void>((_, reject) => { wakeTimer = setTimeout(() => reject(new Error("Wakeup was not reached")), 3000); }),
+        ]);
+        clearTimeout(wakeTimer);
+        // Eleven more callers exceed the default ten-slot pool, with one real
+        // idempotency replay mixed into otherwise distinct dispatch receipts.
+        for (const key of [...Array.from({ length: 10 }, (_, i) => `burst-${i + 1}`), "burst-0"]) {
+          pending.push(svc.runRoutine(routine.id, { source: "api", idempotencyKey: key }));
+        }
+        const settled = Promise.allSettled(pending);
+        await expect.poll(async () => {
+          const rows = await observer.execute(sql`
+            select count(*)::integer as connections,
+              count(*) filter (where wait_event_type = 'Lock'
+                and cardinality(pg_blocking_pids(pid)) > 0)::integer as waiting
+            from pg_stat_activity where datname = current_database()
+          `);
+          sampledPeakConnections = Math.max(sampledPeakConnections, Number(rows[0]?.connections));
+          return Number(rows[0]?.waiting);
+        }, { timeout: 1200, interval: 10 }).toBeGreaterThanOrEqual(9);
+        ordinaryRead = db.execute(sql`select 1`).then(() => true, () => false);
+        readWhileLocked = await Promise.race([
+          ordinaryRead,
+          new Promise<boolean>((resolve) => { readTimer = setTimeout(() => resolve(false), 250); }),
+        ]);
+        releaseWake();
+        results = await settled;
+        console.info("Routine dispatch burst fixture", { concurrencyPolicy, sampledPeakConnections });
+        expect({ readWhileLocked, rejected: results.filter((r) => r.status === "rejected").length })
+          .toEqual({ readWhileLocked: true, rejected: 0 });
+        const runs = results.map((result) => (result as PromiseFulfilledResult<DispatchRun>).value);
+        expect(runs[0].id).toBe(runs.at(-1)!.id);
+        const distinct = [...new Map(runs.map((run) => [run.id, run])).values()];
+        expect(distinct).toHaveLength(11);
+        expect(distinct.filter((run) => run.status === "issue_created")).toHaveLength(1);
+        expect(distinct.filter((run) => run.status === (concurrencyPolicy === "skip_if_active" ? "skipped" : "coalesced"))).toHaveLength(10);
+        expect(distinct.every((run) => run.linkedIssueId === runs[0].linkedIssueId && run.linkedIssueId !== null)).toBe(true);
+        const created = await db.select().from(issues).where(eq(issues.originId, routine.id));
+        expect(created).toHaveLength(1);
+        expect(created[0].originRunId).toBe(runs[0].id);
+        expect(created[0].companyId).toBe(routine.companyId);
+        expect(distinct.every((run) => run.responsibleUserId === created[0].responsibleUserId)).toBe(true);
+        expect(wakeups).toHaveLength(1);
+        expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, routine.companyId))).toHaveLength(1);
+      } finally {
+        releaseWake();
+        if (readTimer) clearTimeout(readTimer);
+        if (wakeTimer) clearTimeout(wakeTimer);
+        await Promise.allSettled(pending);
+        await ordinaryRead;
+        await db.$client.end({ timeout: 1 });
+        db = originalDb;
+        await observer.$client.end({ timeout: 1 });
+      }
+    },
+  );
 
   it("serializes concurrent dispatches until the first execution issue is linked to a queued run", async () => {
     const { routine, svc } = await seedFixture({
