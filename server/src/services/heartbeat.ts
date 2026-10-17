@@ -43,6 +43,7 @@ import { aiConnectionBindingSchema, aiRuntimeConnectionBindingSchema, type AiCon
 import { aiConnectionRouterService, AiConnectionPoolExhausted, applyAiConnectionRouterTaskSettings } from "./ai-connection-router.js";
 import { aiConnectionSessionCompatibilityInputs, managedAiSessionIdentityCompatible } from "./ai-connection-session.js";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
+import { pendingExecutionReconciliations, prepareReconciledExecution, retireReconciledExecutionHolds } from "./execution-recovery-resolution.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-runtime/native-review-participant.js";
@@ -27794,6 +27795,7 @@ export function heartbeatService(
           }
 
           let reconciledSourceRunId: string | null = null;
+          let reconciledAdmission: Awaited<ReturnType<typeof prepareReconciledExecution>> = null;
           let reconciledRestoreRetryCount: number | null = null;
           if (executionReconciliationWake) {
             const actionId = readNonEmptyString(
@@ -27898,6 +27900,8 @@ export function heartbeatService(
             }
             if (action.evidence.continuationDelivery !== "pending")
               return { kind: "skipped" as const };
+            reconciledAdmission = await prepareReconciledExecution(tx as unknown as Db, action, agentId);
+            if (!reconciledAdmission) return { kind: "deferred" as const };
             const [reconciledRun] = await tx.select().from(heartbeatRuns).where(and(
               eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.id, sourceRunId),
             ));
@@ -27912,7 +27916,7 @@ export function heartbeatService(
 
           let continuationWait = { reason: "execution_recovery", message: "Waiting for execution recovery. Your message is saved." };
           const deferBlockedExecution = async (
-            executionBlocker: NonNullable<Awaited<ReturnType<typeof getExecutionBlocker>>>,
+            executionBlocker: Pick<NonNullable<Awaited<ReturnType<typeof getExecutionBlocker>>>, "recoveryActionId" | "nextAction">,
           ) => {
             const condition = { recoveryActionId: executionBlocker.recoveryActionId, ...continuationWait };
             if (executionWaitRequestId) {
@@ -27964,12 +27968,23 @@ export function heartbeatService(
             tx as unknown as Db, issue.companyId, issue.id,
             { conversationResetCommentId: opts.requestedByActorType === "user" ? wakeCommentId : null },
           );
+          // A genuine user message joins the existing saved-input queue while
+          // a recorded decision owns continuation. Otherwise a user turn could
+          // retire only the older hold and leave a second system delivery pending.
+          if (!executionReconciliationWake && opts.requestedByActorType === "user") {
+            const pending = await pendingExecutionReconciliations(tx as unknown as Db, issue.companyId, issue.id, agentId);
+            if (pending.length) return deferBlockedExecution({ recoveryActionId: pending[0]!.id,
+              nextAction: "Waiting for the recorded execution reconciliation. Your input is saved." });
+          }
+          if (executionBlocker && reconciledAdmission &&
+              !reconciledAdmission.covered.some(action => action.id === executionBlocker.recoveryActionId))
+            return deferBlockedExecution(executionBlocker);
           // Prove eligibility without retiring the hold. Later gates can still
           // decline this wake; hold retirement and successor creation stay atomic.
           // A bound chat request has already rechecked its current principal
           // above. Treat its new user message like a board comment, but keep
           // failed-run retry actions on their separate exact-request path.
-          if (executionBlocker && !(await admitExplicitNativeContinuation({
+          if (executionBlocker && !reconciledAdmission && !(await admitExplicitNativeContinuation({
             db: tx as unknown as Db, companyId: issue.companyId, issueId: issue.id,
             agentId, actorType: opts.requestedByActorType, actorId: opts.requestedByActorId,
             reason: durableRequest && !failedChatRetry ? "issue_commented" : reason,
@@ -28735,7 +28750,7 @@ export function heartbeatService(
             return { kind: "skipped" as const };
           }
 
-          const explicitContinuation = await admitExplicitNativeContinuation({
+          const explicitContinuation = reconciledAdmission ? null : await admitExplicitNativeContinuation({
             db: tx as unknown as Db, companyId: issue.companyId, issueId: issue.id,
             agentId, actorType: opts.requestedByActorType, actorId: opts.requestedByActorId,
             reason: durableRequest && !failedChatRetry ? "issue_commented" : reason,
@@ -28743,7 +28758,8 @@ export function heartbeatService(
             queuedCommentInterruptId: opts.queuedCommentInterruptId,
             queuedCommentRequestId: opts.queuedCommentRequestId,
           });
-          if (!explicitContinuation && executionBlocker) return deferBlockedExecution(executionBlocker);
+          if (!explicitContinuation && executionBlocker && !reconciledAdmission) return deferBlockedExecution(executionBlocker);
+          if (reconciledAdmission) await retireReconciledExecutionHolds(tx as unknown as Db, reconciledAdmission);
           if (explicitContinuation) {
             enrichedContextSnapshot.forceFreshSession = true;
             enrichedContextSnapshot.previousRunId = explicitContinuation.previousRunId;
@@ -28874,6 +28890,13 @@ export function heartbeatService(
               updatedAt: new Date(),
             })
             .where(eq(agentWakeupRequests.id, wakeupRequest.id));
+
+          if (reconciledAdmission) await tx.update(issueRecoveryActions).set({
+            evidence: { ...reconciledAdmission.action.evidence,
+              continuationDelivery: "delivered", continuationRunId: newRun.id,
+              coveredRecoveryActionIds: reconciledAdmission.covered.map(action => action.id) },
+          }).where(and(eq(issueRecoveryActions.companyId, issue.companyId),
+            eq(issueRecoveryActions.sourceIssueId, issue.id), eq(issueRecoveryActions.id, reconciledAdmission.action.id)));
 
           if (adoptedComments.length) {
             await tx

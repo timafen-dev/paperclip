@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import express from "express";
 import request from "supertest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
@@ -18,6 +18,11 @@ import {
   environments,
   heartbeatRuns,
   issueComments,
+  issueApprovals,
+  approvals,
+  budgetPolicies,
+  costEvents,
+  nativeRunFinalizations,
   issueInboxArchives,
   issueRecoveryActions,
   issueRelations,
@@ -33,6 +38,8 @@ import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { buildPaperclipWakePayload, heartbeatService } from "../services/heartbeat.js";
 import { deliverReconciledExecutions } from "../services/execution-recovery-resolution.js";
+import { getExecutionBlocker } from "../services/execution-blocker.js";
+import { adapterExecutionControls, createAdapterExecutionControl } from "../services/adapter-execution-control.js";
 import { workspaceOperationService, isNativeWorkspaceFinalizationOperationActive } from "../services/workspace-operations.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
 import { recoveryService } from "../services/recovery/service.js";
@@ -150,6 +157,11 @@ describeEmbeddedPostgres("issue recovery actions", () => {
   afterEach(async () => {
     await db.delete(workspaceOperations);
     await db.delete(issueThreadInteractions);
+    await db.delete(issueApprovals);
+    await db.delete(approvals);
+    await db.delete(nativeRunFinalizations);
+    await db.delete(costEvents);
+    await db.delete(budgetPolicies);
     await db.delete(issueRecoveryActions);
     await db.delete(issueComments);
     await db.delete(environmentLeases);
@@ -1911,6 +1923,210 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       continuationDelivery: "delivered",
       continuationRunId: wakes[0]!.runId,
     });
+  });
+
+  async function seedOlderReconciledDelivery() {
+    const fixture = await seedReconciledDelivery();
+    const { action, companyId, coderId, sourceIssueId, previousRunId } = fixture;
+    const recordedAt = new Date();
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, sourceIssueId));
+    await db.update(heartbeatRuns).set({ status: "cancelled", runtimeMode: "legacy", finishedAt: recordedAt })
+      .where(eq(heartbeatRuns.id, previousRunId));
+    await db.update(issueRecoveryActions).set({ cause: "legacy_execution_requires_reconciliation", outcome: "handed_back", evidence: {
+      ...action.evidence,
+      executionReconciliation: { ...(action.evidence.executionReconciliation as object),
+        actionOutcome: "mixed", actorId: "board", recordedAt: recordedAt.toISOString() },
+    } }).where(eq(issueRecoveryActions.id, action.id));
+    const [older] = await db.insert(issueRecoveryActions).values({
+      companyId, sourceIssueId, kind: "active_run_watchdog", status: "resolved",
+      outcome: "blocked", ownerType: "board", returnOwnerAgentId: coderId,
+      cause: "legacy_execution_requires_reconciliation", fingerprint: randomUUID(), nextAction: "Preserve without replay.",
+      createdAt: new Date(recordedAt.getTime() - 1000),
+      updatedAt: new Date(recordedAt.getTime() - 1000),
+      evidence: { runId: previousRunId, originalFailureCode: "retained-fixture-stop",
+        automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
+    }).returning();
+    return { ...fixture, older: older! };
+  }
+
+  it("delivers one reconciled source despite an older same-run no-replay hold", async () => {
+    const { action, older, heartbeat, companyId, sourceIssueId } = await seedOlderReconciledDelivery();
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(
+      agentWakeupRequests.idempotencyKey, `execution-reconciliation:${action.id}`,
+    ));
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]).toMatchObject({ status: "queued" });
+    expect(await getExecutionBlocker(db, companyId, sourceIssueId)).toBeNull();
+    const [retained] = await db.select().from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.id, older!.id));
+    expect(retained!.evidence.originalFailureCode).toBe("retained-fixture-stop");
+    expect(retained!.createdAt).toEqual(older!.createdAt);
+    expect(retained!.outcome).toBe("blocked");
+    const [receipt] = await db.select().from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.id, action.id));
+    expect(receipt!.evidence).toMatchObject({ continuationDelivery: "delivered",
+      continuationRunId: wakes[0]!.runId });
+    expect(retained!.evidence).toMatchObject({ reconciliationSupersession: {
+      recoveryActionId: action.id, previousAutomaticRecovery: older.evidence.automaticRecovery,
+    } });
+  });
+
+  it("adopts a user delivery into the canonical same-run successor and consumes both receipts", async () => {
+    const { action, heartbeat, companyId, coderId, sourceIssueId, previousRunId } = await seedOlderReconciledDelivery();
+    const [comment] = await db.insert(issueComments).values({ companyId, issueId: sourceIssueId,
+      authorType: "user", authorUserId: "board", body: "Continue with the recorded evidence, without replay." }).returning();
+    const userWake = () => heartbeat.wakeup(coderId, { source: "assignment", reason: "issue_commented",
+      requestedByActorType: "user", requestedByActorId: "board",
+      payload: { issueId: sourceIssueId, commentId: comment!.id },
+      contextSnapshot: { issueId: sourceIssueId, wakeCommentId: comment!.id } });
+    expect(await userWake()).toBeNull();
+    const [saved] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.reason, "issue_commented"));
+    expect(saved).toMatchObject({ status: "deferred_issue_execution", runId: null });
+    await Promise.all([deliverReconciledExecutions(db, heartbeat.wakeup), deliverReconciledExecutions(db, heartbeat.wakeup)]);
+    const [receipt] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const successorId = String(receipt!.evidence.continuationRunId);
+    const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, successorId));
+    expect(successor).toMatchObject({ status: "queued", retryOfRunId: previousRunId });
+    expect(successor!.contextSnapshot?.wakeCommentIds).toContain(comment!.id);
+    const [consumed] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, saved!.id));
+    expect(consumed).toMatchObject({ status: "coalesced", runId: successorId });
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, successorId));
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    // Exercise the native saved-input carrier, not an unbound public wake with
+    // an internal queuedCommentRequestId option. Consumed input stays consumed.
+    await Promise.all([heartbeat.resumeExecutionWaitComments(), heartbeat.resumeExecutionWaitComments()]);
+    const runs = await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId),
+      sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${sourceIssueId}`,
+    ));
+    expect(runs.map(run => run.id).sort()).toEqual([previousRunId, successorId].sort());
+  });
+
+  it("consumes reconciliation with the successor before a lost outer delivery acknowledgement", async () => {
+    const { action, heartbeat, previousRunId } = await seedOlderReconciledDelivery();
+    let successorId: string | undefined;
+    let delivery: Parameters<typeof heartbeat.wakeup> | undefined;
+    await deliverReconciledExecutions(db, async (...args) => {
+      delivery = args;
+      const successor = await heartbeat.wakeup(...args); successorId = successor?.id;
+      const [receipt] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+      expect(receipt!.evidence).toMatchObject({ continuationDelivery: "delivered", continuationRunId: successorId });
+      throw new Error("fixture lost acknowledgement after commit");
+    });
+    expect(successorId).toBeDefined();
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, successorId!));
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    expect((await heartbeat.wakeup(...delivery!))?.id).toBe(successorId);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, previousRunId))).toHaveLength(1);
+  });
+
+  it("coalesces user input behind the queued canonical same-run successor", async () => {
+    const { action, heartbeat, companyId, coderId, sourceIssueId, previousRunId } = await seedOlderReconciledDelivery();
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    const [receipt] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const [comment] = await db.insert(issueComments).values({ companyId, issueId: sourceIssueId,
+      authorType: "user", authorUserId: "board", body: "Keep the recorded completed work." }).returning();
+    const joined = await heartbeat.wakeup(coderId, { source: "assignment", reason: "issue_commented",
+      requestedByActorType: "user", requestedByActorId: "board",
+      payload: { issueId: sourceIssueId, commentId: comment!.id },
+      contextSnapshot: { issueId: sourceIssueId, wakeCommentId: comment!.id } });
+    expect(joined?.id).toBe(receipt!.evidence.continuationRunId);
+    const runs = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+      sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${sourceIssueId}`));
+    expect(runs.map(run => run.id).sort()).toEqual([previousRunId, joined!.id].sort());
+  });
+
+  it("uses the recorded Board decision despite a legacy agent-owned canonical action", async () => {
+    const { action, older, heartbeat, previousRunId } = await seedOlderReconciledDelivery();
+    // The official authenticated resolve route requires Board for the decision;
+    // it does not require or rewrite the action's historical ownerType label.
+    await db.update(issueRecoveryActions).set({ ownerType: "agent" }).where(eq(issueRecoveryActions.id, action.id));
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, previousRunId))).toHaveLength(1);
+    const [retained] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, older.id));
+    expect(retained!.evidence.reconciliationSupersession).toMatchObject({ recoveryActionId: action.id });
+  });
+
+  it.each(["other_run", "other_owner", "other_cause", "newer_hold", "active_hold", "workspace_hold", "ambiguous_decision"])(
+    "keeps %s outside the canonical same-run reconciliation", async (mode) => {
+      const { action, older, heartbeat, companyId, managerId, sourceIssueId, previousRunId } = await seedOlderReconciledDelivery();
+      if (mode === "other_run") await db.update(issueRecoveryActions).set({ evidence: { ...older.evidence, runId: randomUUID() } }).where(eq(issueRecoveryActions.id, older.id));
+      if (mode === "other_owner") await db.update(issueRecoveryActions).set({ returnOwnerAgentId: managerId }).where(eq(issueRecoveryActions.id, older.id));
+      if (mode === "other_cause") await db.update(issueRecoveryActions).set({ cause: "uncertain_provider_action" }).where(eq(issueRecoveryActions.id, older.id));
+      if (mode === "newer_hold") await db.update(issueRecoveryActions).set({ updatedAt: new Date(Date.now() + 10_000) }).where(eq(issueRecoveryActions.id, older.id));
+      if (mode === "active_hold") await db.update(issueRecoveryActions).set({ status: "active" }).where(eq(issueRecoveryActions.id, older.id));
+      if (mode === "workspace_hold") await db.update(issueRecoveryActions).set({ evidence: { ...older.evidence, workspaceRestoreFailure: "restore_unsafe_archive" } }).where(eq(issueRecoveryActions.id, older.id));
+      if (mode === "ambiguous_decision") await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId,
+        kind: action.kind, ownerType: "board", status: "resolved", returnOwnerAgentId: action.returnOwnerAgentId,
+        cause: action.cause, fingerprint: randomUUID(), nextAction: action.nextAction, evidence: action.evidence });
+      await deliverReconciledExecutions(db, heartbeat.wakeup);
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, previousRunId))).toHaveLength(0);
+      const [retained] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, older.id));
+      expect(retained!.evidence.automaticRecovery).toEqual(older.evidence.automaticRecovery);
+      const [receipt] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+      expect(receipt!.evidence.continuationDelivery).toBe("pending");
+    },
+  );
+
+  it.each(["human", "approval", "process", "controller", "coordinator", "lease", "provider_live", "workspace", "budget"])(
+    "preserves %s admission authority and the older hold", async (mode) => {
+      const { action, older, heartbeat, companyId, coderId, sourceIssueId, previousRunId } = await seedOlderReconciledDelivery();
+      if (mode === "human") await db.insert(issueThreadInteractions).values({ companyId, issueId: sourceIssueId,
+        kind: "request_confirmation", requestedResolverPolicy: "human_only", effectiveResolverPolicy: "human_only",
+        payload: { type: "request_confirmation", prompt: "Actual required human decision" } });
+      if (mode === "approval") {
+        const [approval] = await db.insert(approvals).values({ companyId, type: "execution", status: "revision_requested", payload: {} }).returning();
+        await db.insert(issueApprovals).values({ companyId, issueId: sourceIssueId, approvalId: approval!.id });
+      }
+      if (mode === "process") await db.update(heartbeatRuns).set({ processPid: process.pid }).where(eq(heartbeatRuns.id, previousRunId));
+      if (mode === "controller") adapterExecutionControls.set(previousRunId, createAdapterExecutionControl());
+      if (mode === "coordinator") {
+        await db.update(heartbeatRuns).set({ runtimeMode: "native", nativeIssueId: sourceIssueId })
+          .where(eq(heartbeatRuns.id, previousRunId));
+        await db.insert(nativeRunFinalizations).values({ companyId, issueId: sourceIssueId,
+          runId: previousRunId, phase: "terminal_failure", leaseOwner: "owned-fixture-coordinator" });
+      }
+      if (mode === "lease") await db.insert(environmentLeases).values({ companyId, issueId: sourceIssueId, heartbeatRunId: previousRunId, provider: "local" });
+      if (mode === "provider_live") await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, previousRunId));
+      if (mode === "workspace") await db.update(heartbeatRuns).set({ resultJson: { workspaceRestoreFailure: "restore_unsafe_archive" } }).where(eq(heartbeatRuns.id, previousRunId));
+      if (mode === "budget") {
+        await db.insert(budgetPolicies).values({ companyId, scopeType: "agent", scopeId: coderId,
+          windowKind: "lifetime", amount: 1, hardStopEnabled: true });
+        await db.insert(costEvents).values({ companyId, agentId: coderId,
+          provider: "fixture", model: "fixture", costCents: 1, occurredAt: new Date() });
+      }
+      try { await deliverReconciledExecutions(db, heartbeat.wakeup); }
+      finally { adapterExecutionControls.delete(previousRunId); }
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, previousRunId))).toHaveLength(0);
+      const [retained] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, older.id));
+      expect(retained!.evidence).toEqual(older.evidence);
+      const [receipt] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+      expect(receipt!.evidence.continuationDelivery).toBe("pending");
+    },
+  );
+
+  it("does not lend canonical reconciliation authority to an agent delivery", async () => {
+    const { older, heartbeat, coderId, previousRunId } = await seedOlderReconciledDelivery();
+    await deliverReconciledExecutions(db, (agentId, opts) => heartbeat.wakeup(agentId, {
+      ...opts, requestedByActorType: "agent", requestedByActorId: coderId,
+    }));
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, previousRunId))).toHaveLength(0);
+    const [retained] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, older.id));
+    expect(retained!.evidence).toEqual(older.evidence);
+  });
+
+  it("preserves foreign company and source bookkeeping during canonical reconciliation", async () => {
+    const { older, heartbeat, previousRunId } = await seedOlderReconciledDelivery();
+    const foreign = await seedCompany();
+    const [foreignHold] = await db.insert(issueRecoveryActions).values({ ...older, id: randomUUID(),
+      companyId: foreign.companyId, sourceIssueId: foreign.sourceIssueId, returnOwnerAgentId: foreign.coderId,
+    }).returning();
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, previousRunId))).toHaveLength(1);
+    const [retained] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, foreignHold!.id));
+    expect(retained).toEqual(foreignHold);
   });
 
   it("reconciles a lost wake acknowledgement after the exact successor has already finished", async () => {
